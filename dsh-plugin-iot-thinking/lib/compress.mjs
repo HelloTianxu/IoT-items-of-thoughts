@@ -11,7 +11,7 @@ import {
   rememberEffortPlan,
 } from "./effort.mjs";
 import { DEFAULT_STRATEGY, limitsOf, strategyById } from "./strategies.mjs";
-import { hasThinkTag } from "./gates.mjs";
+import { hasLabel, hasThinkTag } from "./gates.mjs";
 import { isOffloaded, normalizeRouteTarget, resolveRewriteRoute } from "./route.mjs";
 
 /** 改写结果 + 账本载荷。是否真的替换由 stream.mjs 判定后写进 replaced。 */
@@ -409,7 +409,15 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    * `{ done: false, reason, detail }` 表示"不合格，可以按原因重试一次"。
    */
   const pass = async ({ strict, reason, detail, stage, temperatureForCall }) => {
-    const instruction = strategy.buildPrompt(text, { strict, reason, detail, limits, state });
+    const instruction = strategy.buildPrompt(text, {
+      strict,
+      reason,
+      detail,
+      limits,
+      state,
+      // 三档基础模式没有"预设正文"，用贴入的文本充当用户补充层。
+      extraPrompt: cfg.customText ?? "",
+    });
     if (!instruction) {
       mark("thinking-skipped", { index, strategy: strategy.id, reason: "no-prompt", stage });
       return { done: true, value: null };
@@ -480,6 +488,19 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         charsOut: String(result.output ?? "").trim().length,
       });
       return { done: false, reason: "has-think-tag", detail: "output", finish: result.finish };
+    }
+
+    // 标签检测必须在 finalize 之前：formatNodes 会给无标签行补 [中性]，
+    // 补完就永远"有标签"，等于没检测。没有标签说明模型大概率只是复述了草稿。
+    if (!hasLabel(result.output, strategy.labels ?? null)) {
+      mark("thinking-no-label", {
+        index,
+        strategy: strategy.id,
+        stage,
+        retried: strict,
+        charsOut: String(result.output ?? "").trim().length,
+      });
+      return { done: false, reason: "no-label", detail: "output", finish: result.finish };
     }
 
     const verdict = strategy.finalize(result.output, { original: text, limits, state, recent });

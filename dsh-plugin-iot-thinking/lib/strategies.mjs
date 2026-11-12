@@ -53,11 +53,16 @@ function itemsStrategy({ id, label, profile, summary, defaults }) {
       ...defaults,
     }),
     accept: "shorter",
+    /** 合法标签集：输出必须至少命中一个，否则判 no-label。 */
+    labels: profileDef.labels,
     retryEvent: "thinking-degenerate",
     accepts: (original, candidate) => isShorterReplacement(original, candidate),
     prepare: () => ({ state: null, error: null }),
     skipInput: (draft) => (isDegenerateDraft(draft) || !sanitizeDraft(draft).trim() ? "degenerate-input" : null),
-    buildPrompt: (draft, { strict }) => buildCompressionPrompt(draft, { profile, strict }),
+    // 用户补充层：三档基础模式也接受一段用户文本作为标签补充。
+    // 空文本时行为与旧版完全一致（不注入任何额外要求）。
+    buildPrompt: (draft, { strict, limits, extraPrompt }) =>
+      buildCompressionPrompt(draft, { profile, strict, limits, extraPrompt }),
     finalize: (raw, { limits }) => {
       // 先看原始输出：formatNodes 会把退化输出整理得"看起来正常"。
       const rawDegenerate = isDegenerateItems(raw);
@@ -90,6 +95,7 @@ function customStrategy() {
       preset: null,
     }),
     accept: "different",
+    labels: PROFILES.full.labels,
     retryEvent: "thinking-rejected",
     accepts: (original, candidate, limits) => {
       const rule = limits?.acceptRule === "shorter" ? "shorter" : "different";

@@ -40,6 +40,8 @@ import { defaultNodeModulesRoots, rootFromEntryPath, versionedRoots } from "./li
 import { guardRequest, redactEvents, registerConfigApi } from "./lib/config-api.mjs";
 import { mark } from "./lib/ledger.mjs";
 import { ConfigStore } from "./lib/config-store.mjs";
+import { hasLabel } from "./lib/gates.mjs";
+import { outputDiscipline } from "./lib/think.mjs";
 import { builtinPresetText } from "./lib/builtin-presets.mjs";
 import { BUILTIN_PRESETS, builtinPresetById, builtinPresetCatalog } from "./lib/builtin-presets.mjs";
 import { migrateLegacyConfig, migrateRewriteConfig, resolveConfig, resolveRewriteRoute, resolveRoute, strategyCatalog } from "./lib/route.mjs";
@@ -1793,11 +1795,65 @@ await check("内置预设可编辑：覆盖文本优先，恢复默认后回到�
   assert.equal(prepared.state.edited, true);
 });
 
+await check("无标签输出：判 no-label 并重试一次，两次都无标签就保留原文", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([
+          { type: "text-delta", index: 0, text: "这段草稿其实是在继续思考，没有任何标签。" },
+          { type: "finish", reason: { kind: "stop" } },
+        ]);
+      },
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { strategy: "custom", rewriteBudget: 3, limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" } }, events, text: DRAFT.repeat(2) });
+  assert.equal(result, null, "两次都无标签就保留原文");
+  assert.equal(calls.length, 2, "只重试一次");
+  assert.ok(events.some((entry) => entry.event === "thinking-no-label" && entry.retried === false));
+  assert.ok(events.some((entry) => entry.event === "thinking-no-label" && entry.retried === true));
+});
+
+await check("无标签检测在 formatNodes 之前：items 的 [中性] 补齐不能掩盖无标签输出", () => {
+  assert.equal(hasLabel("一、要点甲。\n\n二、要点乙。"), false);
+  assert.equal(hasLabel("[决定] 要点甲。"), true);
+  assert.equal(hasLabel("【决定】要点甲。"), true, "全角标签也认");
+  assert.equal(hasLabel("[决定] 甲", ["支持", "反对"]), false, "档位外的标签不算");
+  assert.equal(hasLabel("[支持] 甲", ["支持", "反对"]), true);
+});
+
+await check("三档基础模式也接受用户补充层，且空文本不改变旧行为", () => {
+  const strategy = strategyById("iot-full");
+  const plain = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 } });
+  const withExtra = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 }, extraPrompt: "只保留决定。" });
+  assert.ok(!plain.includes("用户补充要求"));
+  assert.ok(withExtra.includes("用户补充要求"));
+  assert.ok(withExtra.includes("只保留决定。"));
+  assert.ok(withExtra.indexOf("用户补充要求") < withExtra.indexOf("收尾约束"), "补充层在收尾约束之前");
+});
+
+await check("三层提示词：标签层在前、用户补充在中、收尾约束在后", () => {
+  const prompt = buildCustomPrompt("我的补充：只保留决定。", "草稿", { limits: { maxTokens: 2000, noThink: true } });
+  const labelAt = prompt.indexOf("只把草稿压缩成带标签的思维节点");
+  const userAt = prompt.indexOf("我的补充：只保留决定。");
+  const tailAt = prompt.indexOf("收尾约束");
+  assert.ok(labelAt >= 0 && userAt > labelAt && tailAt > userAt, "顺序必须是 标签层 -> 用户层 -> 收尾");
+  assert.ok(prompt.includes("只能补充，不能替掉上面的标签规则"));
+});
+
+await check("收尾约束：字符预算与 maxTokens 匹配，maxOut 优先", () => {
+  assert.ok(outputDiscipline({ maxTokens: 2000 }).includes("约 2400 个字符"));
+  assert.ok(outputDiscipline({ maxTokens: 2000, maxOut: 600 }).includes("约 600 个字符"));
+  assert.ok(outputDiscipline({ maxTokens: 2000 }).includes("2000 tokens"));
+});
+
 await check("输出纪律注入：预算与 noThink 会写进提示词", () => {
   const prompt = buildCustomPrompt("压短", "草稿", { limits: { maxOut: 600, noThink: true } });
-  assert.ok(prompt.includes("不超过 600 个字符"));
+  assert.ok(prompt.includes("不超过约 600 个字符"));
   assert.ok(prompt.includes("<thinking>"));
-  assert.ok(prompt.includes("不要解释你的过程"));
+  assert.ok(prompt.includes("不要解释过程"));
 });
 
 await check("改写超时：模型一直吐字不结束，到点放弃并保留原文（不挂住会话）", async () => {
@@ -2126,11 +2182,11 @@ await check("自定义预设的提示词：默认包进 thinking，写了 draft 
   const wrapped = buildCustomPrompt("把草稿压成三条要点。", "原始草稿内容");
   assert.match(wrapped, /把草稿压成三条要点。/);
   assert.ok(wrapped.includes("<thinking>\n原始草稿内容\n</thinking>"), "草稿要包进 thinking 块");
-  assert.match(wrapped, /现在只输出改写后的内容/);
+  assert.match(wrapped, /现在只输出思维节点/);
 
   const template = buildCustomPrompt("按此改写：\n{{draft}}\n只输出结果。", "原始草稿内容");
   assert.match(template, /按此改写：\n原始草稿内容\n只输出结果。/);
-  assert.ok(!template.includes("<thinking>"), "模板模式不再追加包装");
+  assert.ok(template.includes("每行必须以方括号标签开头"), "模板模式也要带标签层与收尾约束");
 
   // 严格重试带针对性指令。
   assert.match(buildCustomPrompt("规则", "草稿", { strict: true, reason: "degenerate" }), /退化成重复内容/);
@@ -2151,7 +2207,7 @@ await check("自定义预设的改写：成功时返回文本（verdict.text 缺
   const ctx = {
     llm: {
       stream: () => chunks([
-        { type: "text-delta", index: 0, text: "一、要点甲。\n\n二、要点乙。" },
+        { type: "text-delta", index: 0, text: "[决定] 要点甲。\n\n[计划] 要点乙。" },
         { type: "finish", reason: { kind: "stop" } },
       ]),
     },
