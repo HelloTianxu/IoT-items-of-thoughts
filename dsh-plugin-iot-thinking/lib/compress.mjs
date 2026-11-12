@@ -183,6 +183,9 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     const signal = controller?.signal ?? options.signal;
     let timedOut = false;
     let usage = null;
+    // 默认收集：只记类型/长度，不记正文，成本很小；对端到底有没有 reasoning
+    // 通道，靠这个而不是靠猜。要关掉就显式配 `debugChunks: false`。
+    const debugChunks = cfg.debugChunks === false ? null : [];
     const timer = setTimeout(() => {
       timedOut = true;
       controller?.abort?.();
@@ -211,6 +214,15 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         // 只取正文块（assembler 的事）；usage 单独记：服务端统计的
         // completion_tokens 可能包含 reasoning 通道，而正文只有几百字。
         if (chunk?.type === "usage") usage = normalizeUsage(chunk);
+        // 调试：记录对端实际送来的 chunk 形状（类型 + 文本长度），
+        // 用来核对"到底有没有 reasoning 通道"，而不是靠猜。
+        if (debugChunks && chunk?.type) {
+          debugChunks.push({
+            type: String(chunk.type),
+            index: chunk.index ?? null,
+            chars: typeof chunk.text === "string" ? chunk.text.length : null,
+          });
+        }
         assembler.push(chunk);
       }
     } catch (error) {
@@ -250,7 +262,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       .map((block) => block.text)
       .join("\n");
     lastUsage = usage;
-    return { output, finish, usage };
+    lastChunks = debugChunks;
+    return { output, finish, usage, chunks: debugChunks };
   };
 
   /**
@@ -358,6 +371,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
 
   /** 最近一次调用拿到的 usage；服务端计费口径，含被丢弃的思考 token。 */
   let lastUsage = null;
+  /** 最近一次调用的原始 chunk 形状（只在 debugChunks 打开时收集）。 */
+  let lastChunks = null;
 
   const payload = (fields) => ({
     index,
@@ -374,6 +389,12 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     ms: Date.now() - started,
     archived,
     ...(lastUsage ? { usage: lastUsage } : {}),
+    // 思考占比：服务端 token 的大头若在 reasoning，说明这个路由关不掉思考，
+    // 光调 maxTokens 只会更容易把正文截断。
+    ...(lastUsage && Number.isFinite(lastUsage.reasoningTokens) && Number.isFinite(lastUsage.completionTokens) && lastUsage.completionTokens > 0
+      ? { reasoningShare: Number((lastUsage.reasoningTokens / lastUsage.completionTokens).toFixed(2)) }
+      : {}),
+    ...(lastChunks ? { chunks: lastChunks } : {}),
     ...fields,
   });
 
