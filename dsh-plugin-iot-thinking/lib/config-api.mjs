@@ -1186,6 +1186,7 @@ function doRegister(ctx, ws, store, deps = {}) {
         ? {
             strategy: result.event.strategy,
             finish: result.event.finish,
+            usage: result.event.usage ?? null,
             retried: result.event.retried,
             fallback: result.event.fallback,
           }

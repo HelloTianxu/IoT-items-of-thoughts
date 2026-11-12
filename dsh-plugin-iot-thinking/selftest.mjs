@@ -1697,6 +1697,23 @@ await check("卸载：压缩调用真的发往配置的路由，并记账 offloa
   assert.equal(result.event.routeSource, "config");
 });
 
+await check("usage 记账：服务端 token 与可见正文分开记，含被丢弃的思考", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: () => chunks([
+        { type: "reasoning-delta", index: 0, text: "想了很久……" },
+        { type: "text-delta", index: 0, text: "[决定] 先这样。" },
+        { type: "finish", reason: { kind: "stop" } },
+        { type: "usage", usage: { prompt_tokens: 120, completion_tokens: 3400, reasoning_tokens: 3100 } },
+      ]),
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { rewriteBudget: 2 }, events, text: DRAFT.repeat(2) });
+  assert.ok(result && result.text.includes("[决定]"));
+  assert.deepEqual(result.event.usage, { promptTokens: 120, completionTokens: 3400, reasoningTokens: 3100, totalTokens: null });
+});
+
 await check("noThink：输出里出现 think 标签即判失败，且只重试一次", async () => {
   const calls = [];
   const events = [];

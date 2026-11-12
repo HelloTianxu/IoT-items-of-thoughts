@@ -41,6 +41,28 @@ export const REWRITE_TIMEOUT = { defaultMs: 120000, minMs: 1000, maxMs: 600000 }
  */
 export const REWRITE_BUDGET = { defaultCalls: 4, minCalls: 1, maxCalls: 8 };
 
+/**
+ * 服务端计费口径归一：不同适配器给 `completion_tokens` / `output_tokens`，
+ * 有的还单列 `reasoning_tokens`。这些数包含**被丢弃的思考**，所以会和
+ * 最终可见的几百字对不上 —— 记账里把两者都写出来，省得靠猜。
+ */
+function normalizeUsage(chunk) {
+  const raw = chunk?.usage ?? chunk;
+  const pick = (...keys) => {
+    for (const key of keys) {
+      const value = raw?.[key];
+      if (Number.isFinite(value)) return Math.floor(value);
+    }
+    return null;
+  };
+  return {
+    promptTokens: pick("prompt_tokens", "input_tokens"),
+    completionTokens: pick("completion_tokens", "output_tokens"),
+    reasoningTokens: pick("reasoning_tokens", "reasoningTokens", "completion_tokens_details.reasoning_tokens"),
+    totalTokens: pick("total_tokens"),
+  };
+}
+
 /** 超时即拒，且不留下挂住的 timer。 */
 function withTimeout(promise, timeoutMs, label) {
   return new Promise((resolve, reject) => {
@@ -160,6 +182,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     const signal = controller?.signal ?? options.signal;
     let timedOut = false;
+    let usage = null;
     const timer = setTimeout(() => {
       timedOut = true;
       controller?.abort?.();
@@ -184,7 +207,12 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         purpose: "compaction",
         ...(signal === undefined ? {} : { signal }),
       });
-      for await (const chunk of stream) assembler.push(chunk);
+      for await (const chunk of stream) {
+        // 只取正文块（assembler 的事）；usage 单独记：服务端统计的
+        // completion_tokens 可能包含 reasoning 通道，而正文只有几百字。
+        if (chunk?.type === "usage") usage = normalizeUsage(chunk);
+        assembler.push(chunk);
+      }
     } catch (error) {
       clearTimeout(timer);
       return {
@@ -221,7 +249,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       .filter((block) => block && block.type === "text" && typeof block.text === "string" && block.text.trim())
       .map((block) => block.text)
       .join("\n");
-    return { output, finish };
+    lastUsage = usage;
+    return { output, finish, usage };
   };
 
   /**
@@ -327,6 +356,9 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     return result;
   };
 
+  /** 最近一次调用拿到的 usage；服务端计费口径，含被丢弃的思考 token。 */
+  let lastUsage = null;
+
   const payload = (fields) => ({
     index,
     provider: active.provider,
@@ -341,6 +373,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     charsIn: text.length,
     ms: Date.now() - started,
     archived,
+    ...(lastUsage ? { usage: lastUsage } : {}),
     ...fields,
   });
 
