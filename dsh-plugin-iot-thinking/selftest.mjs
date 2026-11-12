@@ -39,6 +39,7 @@ import { defaultNodeModulesRoots, rootFromEntryPath, versionedRoots } from "./li
 import { guardRequest, redactEvents, registerConfigApi } from "./lib/config-api.mjs";
 import { mark } from "./lib/ledger.mjs";
 import { ConfigStore } from "./lib/config-store.mjs";
+import { BUILTIN_PRESETS, builtinPresetById, builtinPresetCatalog } from "./lib/builtin-presets.mjs";
 import { migrateLegacyConfig, migrateRewriteConfig, resolveConfig, resolveRewriteRoute, resolveRoute, strategyCatalog } from "./lib/route.mjs";
 import {
   DEFAULT_STRATEGY,
@@ -1508,6 +1509,96 @@ await check("改写器路由：只填 provider 不算配了，继续往下掉一
   assert.equal(route.provider, "session-p");
 });
 
+await check("内置预设：两个模板都在、只读、且要求必须更短", () => {
+  const ids = BUILTIN_PRESETS.map((preset) => preset.id);
+  assert.deepEqual(ids, ["standard", "deep"]);
+  for (const preset of BUILTIN_PRESETS) {
+    assert.equal(preset.accept, "shorter", `${preset.id} 必须要求更短，否则会拿更长的输出替换原文`);
+    assert.ok(preset.text.includes("{{draft}}"), `${preset.id} 必须带 draft 槽位`);
+    assert.ok(preset.text.length > 200);
+    assert.ok(Number.isFinite(preset.minChars) && preset.minChars >= 400);
+    assert.equal(builtinPresetById(preset.id).id, preset.id);
+    assert.equal(builtinPresetById(`builtin:${preset.id}`).id, preset.id);
+  }
+  assert.equal(builtinPresetById("nope"), null);
+  const catalog = builtinPresetCatalog();
+  assert.deepEqual(catalog.map((entry) => entry.value), ["builtin:standard", "builtin:deep"]);
+});
+
+await check("内置预设：custom 档位按 builtin 装配提示词，accept 由预设决定", () => {
+  const resolved = resolveConfig({ strategy: "custom", defaultPreset: "builtin:standard" }, { sessionId: "s" });
+  assert.equal(resolved.limits.preset.kind, "builtin");
+  assert.equal(resolved.limits.preset.name, "standard");
+  assert.equal(resolved.limits.acceptRule, "shorter", "内置预设必须强制 shorter");
+  const strategy = strategyById("custom");
+  const prepared = strategy.prepare(resolved.limits);
+  assert.equal(prepared.error, null);
+  assert.ok(prepared.state.text.includes("【决定】"));
+  const prompt = strategy.buildPrompt("草稿", { strict: false, reason: null, detail: null, state: prepared.state });
+  assert.ok(prompt.includes("草稿"));
+  assert.ok(prompt.includes("【计划】"));
+
+  // 会话覆盖优先于全局默认预设。
+  const session = resolveConfig(
+    { strategy: "custom", defaultPreset: "builtin:standard", sessions: { "s": { strategy: "custom", preset: "builtin:deep" } } },
+    { sessionId: "s" },
+  );
+  assert.equal(session.limits.preset.name, "deep");
+});
+
+await check("内置预设：目录文件与内置预设互不冲突，未知内置名报错而不是静默", () => {
+  const unknown = resolveConfig({ strategy: "custom", defaultPreset: "builtin:nope" }, { sessionId: "s" });
+  assert.equal(unknown.limits.preset.kind, "builtin");
+  const prepared = strategyById("custom").prepare(unknown.limits);
+  assert.equal(prepared.error, "没有这个内置预设：nope");
+  assert.equal(prepared.state, null);
+});
+
+await check("会话覆盖：对象形态 {strategy,preset} 能解析，旧字符串形态仍读得懂", () => {
+  const objectForm = resolveRoute({ sessions: { s1: { strategy: "custom", preset: "builtin:deep" } } }, { sessionId: "s1" });
+  assert.deepEqual(objectForm, { id: "custom", builtin: "deep", source: "session", key: "s1" });
+  const stringForm = resolveRoute({ sessions: { s1: "custom:my-style" } }, { sessionId: "s1" });
+  assert.deepEqual(stringForm, { id: "custom", custom: "my-style", source: "session", key: "s1" });
+  const plainForm = resolveRoute({ sessions: { s1: "iot-compact" } }, { sessionId: "s1" });
+  assert.deepEqual(plainForm, { id: "iot-compact", source: "session", key: "s1" });
+});
+
+await check("内置预设：真改写走 custom 档位，提示词里带预设正文", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([{ type: "text-delta", index: 0, text: GOOD }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const result = await compressWith(ctx, {
+    cfg: { strategy: "custom", limits: { ...limitsOf("custom"), preset: { kind: "builtin", name: "standard" }, acceptRule: "shorter" } },
+    events,
+    text: DRAFT.repeat(3),
+  });
+  assert.equal(result?.text, GOOD);
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].messages[0].content[0].text.includes("【决定】"), "内置预设正文要进提示词");
+  assert.equal(result.event.strategy, "custom", "记账要写实际档位");
+});
+
+await check("内置预设：比原文长的输出不被接受（shorter 规则）", async () => {
+  const long = GOOD.repeat(20);
+  const ctx = {
+    llm: {
+      stream: () => chunks([{ type: "text-delta", index: 0, text: long }, { type: "finish", reason: { kind: "stop" } }]),
+    },
+  };
+  const result = await compressWith(ctx, {
+    cfg: { strategy: "custom", limits: { ...limitsOf("custom"), preset: { kind: "builtin", name: "standard" }, acceptRule: "shorter" } },
+    text: DRAFT.repeat(3),
+  });
+  assert.equal(result, null, "更长的输出必须保留原文");
+});
+
 await check("改写器路由迁移：旧顶层字段搬进 rewrite，旧键删掉", () => {
   const migrated = migrateRewriteConfig({ enabled: true, provider: "old-p", model: "old-m", reasoningEffort: "high" });
   assert.deepEqual(migrated.rewrite, { provider: "old-p", model: "old-m", effort: "high" });
@@ -2129,6 +2220,67 @@ await check("config API：映射表是整表替换 —— 删除与清空都能�
     body: JSON.stringify({ agentPresets: { jingjing: "custom:my-style" } }),
   });
   assert.deepEqual(custom.payload.config.agentPresets, { jingjing: "custom:my-style" });
+});
+
+await check("session API：会话级 prompt 与档位一起落盘，未知内置名被拒", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-session-preset-")), "config.json"));
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const put = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s-preset", strategy: "custom", preset: "builtin:deep" }),
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual(put.payload.override, { strategy: "custom", preset: "builtin:deep" }, "会话覆盖要保留 prompt");
+  assert.equal(put.payload.route.id, "custom");
+
+  const get = await ws.call("/iot-thinking/api/session", { url: "/iot-thinking/api/session?sessionId=s-preset" });
+  assert.deepEqual(get.payload.override, { strategy: "custom", preset: "builtin:deep" }, "GET 要能还原");
+  assert.equal(get.payload.choices.builtinPresets.length, 2);
+
+  const bad = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s-preset", strategy: "custom", preset: "builtin:nope" }),
+  });
+  assert.equal(bad.statusCode, 400, "未知内置名不能静默落盘");
+
+  // 清除覆盖。
+  const cleared = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s-preset", strategy: null }),
+  });
+  assert.equal(cleared.payload.override, null);
+});
+
+await check("config API：defaultPreset 只收三种形态，未知内置名不落盘", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-default-preset-")), "config.json"));
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const builtin = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ defaultPreset: "builtin:standard" }),
+  });
+  assert.equal(builtin.payload.config.defaultPreset, "builtin:standard");
+
+  const file = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ defaultPreset: "custom:my-style" }),
+  });
+  assert.equal(file.payload.config.defaultPreset, "custom:my-style");
+
+  const inline = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ defaultPreset: "custom" }),
+  });
+  assert.equal(inline.payload.config.defaultPreset, "custom");
+
+  const junk = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ defaultPreset: "iot-full" }),
+  });
+  assert.equal(junk.payload.config.defaultPreset, "custom", "非法值不该覆盖已有的合法值");
 });
 
 await check("config API：rewrite 路由能落盘、能增量改、非法值被挡，且只报警不拒绝", async () => {

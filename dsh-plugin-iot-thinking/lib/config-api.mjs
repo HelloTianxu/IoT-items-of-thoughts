@@ -12,6 +12,7 @@ import { tailEvents } from "./ledger.mjs";
 import { strategyById, strategyIds } from "./strategies.mjs";
 import { normalizeRouteEntry, resolveConfig, resolveRewriteRoute, strategyCatalog } from "./route.mjs";
 import { listPresets, readPreset, writePreset } from "./custom.mjs";
+import { builtinPresetCatalog, builtinPresetById } from "./builtin-presets.mjs";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -189,8 +190,12 @@ function strategyValue(value) {
   if (value === null || value === "") return null;
   const entry = normalizeRouteEntry(value);
   if (!entry) return undefined;
-  if (entry.id === "custom") return entry.custom ? `custom:${entry.custom}` : "custom";
-  return entry.id;
+  if (entry.id !== "custom") return entry.id;
+  // 会话级覆盖允许带 prompt：`{ strategy: "custom", preset: "builtin:standard" }`。
+  // 落盘形态保持对象，读的时候两种形态都认。
+  if (entry.builtin) return { strategy: "custom", preset: `builtin:${entry.builtin}` };
+  if (entry.custom) return `custom:${entry.custom}`;
+  return "custom";
 }
 
 /**
@@ -216,6 +221,10 @@ function strategyTable(patch) {
     if (!entry) continue;
     // 自定义预设要保住名字（那是 presetDir 里的文件名）：存成 `custom:名字`。
     if (entry.id === "custom") {
+      if (entry.builtin) {
+        out[key] = { strategy: "custom", preset: `builtin:${entry.builtin}` };
+        continue;
+      }
       out[key] = entry.custom ? `custom:${entry.custom}` : "custom";
       continue;
     }
@@ -262,6 +271,18 @@ function sanitize(payload) {
   if (typeof payload.presetDir === "string") next.presetDir = payload.presetDir.trim();
   if (typeof payload.customText === "string") next.customText = payload.customText;
   if (payload.presetAccept === "shorter" || payload.presetAccept === "different") next.presetAccept = payload.presetAccept;
+  // 全局默认的"自定义预设"：`builtin:<id>` / `custom:<文件名>` / `custom`（贴入文本）。
+  // 只收这三种形态，其它一律丢弃（写进去也不会被 resolveConfig 用上）。
+  if (payload.defaultPreset === null) {
+    next.defaultPreset = null;
+  } else if (typeof payload.defaultPreset === "string") {
+    const raw = payload.defaultPreset.trim();
+    const entry = raw ? normalizeRouteEntry(raw) : null;
+    if (!raw) next.defaultPreset = null;
+    else if (entry?.id === "custom" && entry.builtin) next.defaultPreset = `builtin:${entry.builtin}`;
+    else if (entry?.id === "custom" && entry.custom) next.defaultPreset = `custom:${entry.custom}`;
+    else if (raw === "custom") next.defaultPreset = "custom";
+  }
   // 改写器路由（算力卸载）：新形状是 `rewrite` 块；旧卡片发的顶层
   // provider/model/reasoningEffort 折进同一个块，行为不变。
   if (payload.rewrite !== undefined) {
@@ -376,13 +397,17 @@ function valueChoices(cfg = {}) {
     isCustom: entry.family === "custom",
   }));
   const presets = [];
+  // 内置预设排在最前面：多数人没有 presetDir，也不该被要求先写一份文件。
+  for (const preset of builtinPresetCatalog()) {
+    presets.push({ value: preset.value, label: preset.name, bytes: preset.bytes, kind: "builtin", summary: preset.summary });
+  }
   if (String(cfg.customText ?? "").trim()) {
-    presets.push({ value: "custom", label: "贴入的文本", bytes: null });
+    presets.push({ value: "custom", label: "贴入的文本", bytes: null, kind: "inline" });
   }
   for (const preset of listing.presets) {
-    presets.push({ value: `custom:${preset.name}`, label: preset.name, bytes: preset.bytes });
+    presets.push({ value: `custom:${preset.name}`, label: preset.name, bytes: preset.bytes, kind: "file" });
   }
-  return { tiers, presets, presetDirSet: listing.configured };
+  return { tiers, presets, presetDirSet: listing.configured, builtinPresets: builtinPresetCatalog() };
 }
 
 /** 会话 id → agent preset（会话投影里的值）。取不到返回 undefined。 */
@@ -656,17 +681,29 @@ function doRegister(ctx, ws, store, deps = {}) {
           sendJson(res, 400, { error: "sessionId is required" });
           return;
         }
-        // `strategy` 是档位名（或 `custom[:预设名]`），`null` 表示清除这层覆盖。
+        // `strategy` 是档位名（或 `custom[:预设名]` / `builtin:名字` / 对象形态），
+        // `null` 表示清除这层覆盖。`preset` 只在 custom 档位下生效 ——
+        // 会话级 prompt 是"这一档用哪份规格"，不是独立的第五档。
         const cleared = payload.strategy === null || payload.strategy === "";
-        const entry = cleared ? null : normalizeRouteEntry(payload.strategy);
+        const raw = cleared
+          ? null
+          : payload.preset !== undefined && payload.preset !== null && payload.preset !== ""
+            ? { strategy: payload.strategy, preset: payload.preset }
+            : payload.strategy;
+        const entry = cleared ? null : normalizeRouteEntry(raw);
         if (!cleared && !entry) {
           sendJson(res, 400, { error: `unknown strategy: ${JSON.stringify(payload.strategy)}` });
+          return;
+        }
+        if (!cleared && entry.builtin && !builtinPresetById(entry.builtin)) {
+          sendJson(res, 400, { error: `unknown preset: ${entry.builtin}` });
           return;
         }
         const cfg = store.load();
         const sessions = { ...(cfg.sessions ?? {}) };
         // `null` = 回到"跟随 preset / 全局默认"，这正是"清除本会话覆盖"的语义。
         if (!entry) delete sessions[sessionId];
+        else if (entry.id === "custom" && entry.builtin) sessions[sessionId] = { strategy: "custom", preset: `builtin:${entry.builtin}` };
         else if (entry.id === "custom") sessions[sessionId] = entry.custom ? `custom:${entry.custom}` : "custom";
         else sessions[sessionId] = entry.id;
         store.save({ sessions });

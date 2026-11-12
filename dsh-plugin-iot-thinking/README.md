@@ -114,7 +114,41 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 - **推理档位（`rewrite.effort`）** — `auto` 默认：先发 `off`（改写器不花预算在自己的
   thinking 上），宿主拒绝该档位就改用该路由公开的 `minimal`/`low`，没有就不发这个字段。
   决策按 `(provider, model, 档位)` 记住，同一路由不会再白试一次；
-- **压缩器路由（算力卸载）** — 见下一节：可以指定压缩调用走哪条路由，也可以按档位覆盖。
+- **压缩器路由（算力卸载）** — 见下一节：可以指定压缩调用走哪条路由，也可以按档位覆盖；
+- **内置预设** — 两个只读模板（决策骨架 / 记忆锚点），点选即设为全局默认；
+- **会话级 prompt** — custom 档位下可按会话指定规格，默认跟随全局。
+
+### 内置预设（开箱即用）
+
+不想自己写规格时，设置卡里「内置预设」有两个可直接点选的只读模板：
+
+| id | 名字 | 适用 |
+|---|---|---|
+| `standard` | 标准结构化压缩（决策骨架） | 大多数长思考：保留结论/权衡/风险/待定/计划，压掉推导与试错 |
+| `deep` | 超长上下文深度压缩（记忆锚点） | 极长思考链、长对话续推：只留结论/约束/权衡/计划四类锚点 |
+
+它们随插件发布，**不需要 presetDir、不能另存覆盖**（要改就复制到目录里改）。
+内置预设的替换规则固定为 `shorter` —— 一条不比原文短的输出不该替换掉整块 thinking。
+
+点「用这个」会同时把默认档位切到「自定义预设」并写入 `defaultPreset`；
+全局默认预设只在 custom 档位、且没有会话/preset 映射覆盖时生效。
+
+### 会话级 prompt
+
+会话覆盖不只是档位：custom 档位下可以单独指定这个会话用哪份规格（内置预设、
+目录里的文件、贴入的文本），默认跟随全局配置。
+
+```text
+sessions: {
+  "<sessionId>": { "strategy": "custom", "preset": "builtin:deep" }
+}
+```
+
+- 头部下拉：选「自定义预设」后出现第二个下拉（规格），两者一起落盘。
+- `/iot preset:<名字>`：内置预设优先；没命中就当目录里的文件名。
+- `/iot custom:<文件名>` 仍然可用，等价于 `preset: "custom:<文件名>"`。
+- 旧形态 `"custom:名字"` 字符串仍读得懂；新写入统一成对象形态。
+- 未知内置名会被拒绝（400），不会静默落盘。
 
 ### 压缩器路由（算力卸载）
 
@@ -155,6 +189,7 @@ $DSH_HOME/plugin-data/iot-thinking/config.json
   },
   "agentPresets": { "standard": "iot-balanced", "jingjing": "custom:character-inner-voice" },
   "sessions": { "<sessionId>": "iot-compact" },
+  "defaultPreset": null,                     // "builtin:standard" / "custom:文件名" / "custom"
   "rewrite": {                               // 压缩器路由（算力卸载）
     "provider": null,                        // null = 跟随当前请求
     "model": null,
@@ -243,8 +278,9 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 | `index.mjs` | host 半个：`llm/stream` 钩子（按会话解析档位）、配置桥、`/iot` 命令、最近路由 |
 | `lib/stream.mjs` | 纯 chunk 转换器（扣住 → 改写 → 一个 delta + 改写的 block-end）；替换判定交给档位 |
 | `lib/strategies.mjs` | 档位注册表：三档基础 + `custom` + `off`，五个部件（prepare / skipInput / buildPrompt / finalize / accepts） |
-| `lib/route.mjs` | 档位三层解析、改写器路由解析（算力卸载）、旧配置迁移、档位目录 |
+| `lib/route.mjs` | 档位三层解析、改写器路由解析（算力卸载）、内置预设解析、旧配置迁移、档位目录 |
 | `lib/custom.mjs` | 自定义预设：目录 / 列表 / 读（mtime 缓存）/ 另存为 / 提示词拼装 |
+| `lib/builtin-presets.mjs` | 内置预设（standard / deep）：正文、元数据、清单 |
 | `lib/gates.mjs` | 自定义预设的四道最小闸 |
 | `lib/switch.mjs` | `/iot` 的纯逻辑（与 HTTP 桥共用同一张 `sessions` 表） |
 | `lib/compress.mjs` | 通用改写引擎：模型调用、effort 恢复、按档位判定与重试、确定性兜底 |

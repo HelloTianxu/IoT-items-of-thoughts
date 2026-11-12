@@ -9,6 +9,7 @@ import {
   strategyById,
   strategyIds,
 } from "./strategies.mjs";
+import { builtinPresetById } from "./builtin-presets.mjs";
 
 /** 归一化一个策略 id；不认识就返回 null（调用方继续往下一层找）。 */
 export function normalizeStrategyId(value) {
@@ -35,6 +36,21 @@ export function normalizeRouteEntry(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const base = normalizeEntryString(value.strategy);
   if (!base) return null;
+  // 对象形态：`{ strategy: "custom", preset: "builtin:standard" }`。
+  // preset 只在 custom 档位有意义；别的档位带了 preset 也不报错，直接忽略。
+  const preset = typeof value.preset === "string" && value.preset.trim() ? value.preset.trim() : null;
+  if (base.id === "custom") {
+    const fromPreset = preset ? normalizeEntryString(preset) : null;
+    if (fromPreset && fromPreset.id === "custom") {
+      return {
+        id: "custom",
+        ...(fromPreset.builtin ? { builtin: fromPreset.builtin } : {}),
+        ...(fromPreset.custom ? { custom: fromPreset.custom } : {}),
+      };
+    }
+    // `preset: "custom"` = 贴入的文本；没有 preset 字段时退回 base 自己的名字。
+    if (preset === "custom") return { id: "custom", custom: null };
+  }
   const custom = typeof value.custom === "string" && value.custom.trim() ? value.custom.trim() : base.custom ?? null;
   return {
     id: base.id,
@@ -46,6 +62,11 @@ export function normalizeRouteEntry(value) {
 function normalizeEntryString(raw) {
   const text = typeof raw === "string" ? raw.trim() : "";
   if (!text) return null;
+  // `builtin:名字` 指向随插件发布的内置预设（只读）。
+  if (text.startsWith("builtin:")) {
+    const name = text.slice("builtin:".length).trim();
+    return { id: "custom", builtin: name || null };
+  }
   // `custom` 与 `custom:` 都是"用贴进来的那段文本"；`custom:名字` 指向 presetDir 里的文件。
   if (text === "custom" || text === "custom:") return { id: "custom", custom: null };
   if (text.startsWith("custom:")) {
@@ -103,10 +124,34 @@ export function resolveConfig(cfg, who = {}) {
   const limits = limitsOf(route.id, overrides, base);
 
   if (route.id === "custom") {
-    limits.preset = route.custom
-      ? { name: route.custom, dir: base.presetDir }
-      : { inline: base.customText ?? "", name: "（贴入的文本）" };
-    limits.acceptRule = base.presetAccept === "shorter" ? "shorter" : "different";
+    if (route.builtin) {
+      // 内置预设：只读、随插件发布，不需要 presetDir。替换规则由预设自己定
+      // （内置的全部要求"必须更短"），不受全局 presetAccept 影响。
+      const preset = builtinPresetById(route.builtin);
+      limits.preset = { kind: "builtin", name: route.builtin };
+      limits.acceptRule = preset?.accept === "shorter" ? "shorter" : "different";
+      // 预设自带的最小字符数只是下限：用户在 strategies.custom 里配的值更大时以用户为准。
+      if (preset && Number.isFinite(preset.minChars)) limits.minChars = Math.max(limits.minChars ?? 0, preset.minChars);
+    } else if (route.custom) {
+      limits.preset = { name: route.custom, dir: base.presetDir };
+      limits.acceptRule = base.presetAccept === "shorter" ? "shorter" : "different";
+    } else {
+      // 没有会话/映射指定规格时，用全局默认预设；它可以是内置的、目录里的，
+      // 或"贴入的文本"（旧行为，defaultPreset 为 null 时）。
+      const fallbackPreset = normalizeRouteEntry(base.defaultPreset);
+      if (fallbackPreset?.builtin) {
+        const preset = builtinPresetById(fallbackPreset.builtin);
+        limits.preset = { kind: "builtin", name: fallbackPreset.builtin };
+        limits.acceptRule = preset?.accept === "shorter" ? "shorter" : "different";
+        if (preset && Number.isFinite(preset.minChars)) limits.minChars = Math.max(limits.minChars ?? 0, preset.minChars);
+      } else if (fallbackPreset?.custom) {
+        limits.preset = { name: fallbackPreset.custom, dir: base.presetDir };
+        limits.acceptRule = base.presetAccept === "shorter" ? "shorter" : "different";
+      } else {
+        limits.preset = { inline: base.customText ?? "", name: "（贴入的文本）" };
+        limits.acceptRule = base.presetAccept === "shorter" ? "shorter" : "different";
+      }
+    }
   }
 
   const off = strategy?.family === "off";

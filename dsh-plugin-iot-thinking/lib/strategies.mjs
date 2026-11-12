@@ -13,6 +13,7 @@ import {
 } from "./think.mjs";
 import { judge, stylometry } from "./gates.mjs";
 import { buildCustomPrompt, readPreset } from "./custom.mjs";
+import { builtinPresetById } from "./builtin-presets.mjs";
 
 /** 基础三档的替换规则：候选必须非空且严格更短。 */
 export function isShorterReplacement(original, candidate) {
@@ -97,6 +98,12 @@ function customStrategy() {
     prepare: (limits) => {
       const preset = limits?.preset;
       if (!preset) return { state: null, error: "还没选自定义预设" };
+      // 内置预设：只读、随插件发布，不需要 presetDir。
+      if (preset.kind === "builtin" || preset.builtin) {
+        const builtin = builtinPresetById(preset.name ?? preset.builtin);
+        if (!builtin) return { state: null, error: `没有这个内置预设：${String(preset.name ?? preset.builtin)}` };
+        return { state: { text: builtin.text, label: builtin.name, path: `builtin:${builtin.id}` }, error: null };
+      }
       if (preset.inline) {
         const text = String(preset.inline).trim();
         if (!text) return { state: null, error: "自定义预设是空的（贴一段文本，或从目录选一份）" };

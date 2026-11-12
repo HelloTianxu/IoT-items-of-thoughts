@@ -41,6 +41,11 @@ export const DEFAULTS = Object.freeze({
    * 是保留原文（keep）还是回退到会话路由再试一次（session）。
    */
   rewrite: { provider: null, model: null, effort: "auto", fallback: "keep" },
+  /**
+   * 全局默认的"自定义预设"：`builtin:<id>` / `custom:<文件名>` / `custom`（贴入的文本）。
+   * 只在 custom 档位且没有会话/映射覆盖时使用；null = 沿用旧行为（贴入文本）。
+   */
+  defaultPreset: null,
   // 旧形状，只读兼容：load() 会把它们搬进 rewrite 并删键。
   provider: undefined,
   model: undefined,
@@ -97,13 +102,18 @@ function strategyMap(value) {
     if (typeof key !== "string" || !key) continue;
     const normalized = normalizeRouteEntry(entry);
     if (!normalized) continue;
-    // 自定义预设：`custom:名字` 要保住名字（那是 presetDir 里的文件名）。
+    // 自定义预设：`custom:名字` 要保住名字（那是 presetDir 里的文件名）；
+    // 会话级 prompt 是对象形态 `{ strategy: "custom", preset }`，也原样保留 ——
+    // 否则"选了 prompt"会在下一次 load 时被归一成字符串丢掉。
     if (normalized.id === "custom") {
+      if (normalized.builtin) {
+        out[key] = { strategy: "custom", preset: `builtin:${normalized.builtin}` };
+        continue;
+      }
       out[key] = normalized.custom ? `custom:${normalized.custom}` : "custom";
       continue;
     }
-    // 文件里一律写字符串；自定义预设保住名字（那是 presetDir 里的文件名）。
-    out[key] = normalized.id === "custom" && normalized.custom ? `custom:${normalized.custom}` : normalized.id;
+    out[key] = normalized.id;
   }
   return out;
 }

@@ -213,6 +213,8 @@ window.__ModuleLoader__.load({
       const [choices, setChoices] = useState({ tiers: [], presets: [] });
       /** 自定义预设（第 4 项）的目录与文件列表。 */
       const [presetFiles, setPresetFiles] = useState([]);
+      /** 内置预设（随插件发布，只读）：清单来自 /api/status 的 choices。 */
+      const [builtinPresets, setBuiltinPresets] = useState([]);
       const [presetDirSet, setPresetDirSet] = useState(false);
       /** 正在编辑的预设：`{ name, text }`；name 为空表示"还没起名"。 */
       const [editor, setEditor] = useState({ name: "", text: "", note: null });
@@ -242,6 +244,7 @@ window.__ModuleLoader__.load({
           if (Array.isArray(data.strategies)) setCatalog(data.strategies);
           if (data.choices && typeof data.choices === "object" && !Array.isArray(data.choices)) setChoices(data.choices);
           if (Array.isArray(data.presetFiles)) setPresetFiles(data.presetFiles);
+          if (data.choices && Array.isArray(data.choices.builtinPresets)) setBuiltinPresets(data.choices.builtinPresets);
           if (typeof data.presetDirSet === "boolean") setPresetDirSet(data.presetDirSet);
           setEvents(Array.isArray(data.events) ? data.events : []);
           if (announce) setMsg("已从 host 重新加载");
@@ -588,6 +591,11 @@ window.__ModuleLoader__.load({
       };
 
       const activeId = cfg.strategy ?? "iot-full";
+      // custom 档位下"用哪份规格"有两条来源：strategy 里的 `custom:名字`（旧写法），
+      // 或全局 defaultPreset（内置预设走这条，不占 strategy 名字空间）。
+      const activePresetValue = tierOf(activeId) === "custom"
+        ? (typeof cfg.defaultPreset === "string" && cfg.defaultPreset ? cfg.defaultPreset : targetOf(activeId))
+        : "";
       const isCustomValue = (value) => typeof value === "string" && (value === "custom" || value.startsWith("custom:"));
       const active = catalog.find((entry) => entry.id === activeId)
         ?? STRATEGY_FALLBACK.find((entry) => entry.id === activeId)
@@ -659,9 +667,17 @@ window.__ModuleLoader__.load({
             ),
             tierOf(activeId) === "custom"
               ? h("select", {
-                  value: targetOf(activeId),
+                  value: activePresetValue,
+                  title: "这份规格是全局默认：会话没单独选时用它。内置预设只读；目录文件可编辑。",
                   style: { ...input, flex: "0 0 240px", padding: "6px 8px" },
-                  onChange: (e) => set({ strategy: e.target.value }),
+                  onChange: (e) => {
+                    const value = e.target.value;
+                    // 内置预设写成 defaultPreset（只读、不占 strategy 的名字空间）；
+                    // 文件/贴入文本仍沿用 `custom[:名字]` 的老写法。
+                    set(value.startsWith("builtin:")
+                      ? { strategy: "custom", defaultPreset: value }
+                      : { strategy: value, defaultPreset: null });
+                  },
                 },
                   ...(presetChoices.length
                     ? presetChoices.map((entry) => h("option", { key: entry.value, value: entry.value }, entry.label))
@@ -884,6 +900,43 @@ window.__ModuleLoader__.load({
                 onClick: () => set({ sessions: {} }),
               }, "清空所有会话覆盖（" + sessionKeys.length + "）")
             : null
+        ),
+
+        // ── 内置预设（开箱即用） ────────────────────────────────────────────
+        h("div", { style: section },
+          h("div", { style: sectionHead },
+            h("div", { style: sectionTitle }, "内置预设（开箱即用）"),
+            h("span", { style: hint }, "只读 · 随插件发布")
+          ),
+          h("div", { style: { ...hint, marginTop: 4 } },
+            "不想自己写规格时，直接点一个。它们只在「自定义预设」档位下生效：点「用这个」会同时把默认档位切到自定义预设。"),
+          builtinPresets.length === 0
+            ? h("div", { style: { ...hint, marginTop: 6 } }, "宿主没有下发内置清单（旧版本或 headless 组合）。")
+            : h("div", { style: { border: "1px solid var(--dsw-alias-border-l2, #e6e9ee)", borderRadius: 8, overflow: "hidden", marginTop: 8 } },
+                ...builtinPresets.map((preset, index) => h("div", {
+                  key: preset.id,
+                  style: {
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "8px 10px",
+                    borderTop: index === 0 ? "none" : "1px solid var(--dsw-alias-border-l2, #eef0f3)",
+                  },
+                },
+                  h("div", { style: { minWidth: 0 } },
+                    h("div", { style: { ...monoLabel, fontWeight: 600 } }, preset.name),
+                    h("div", { style: { ...hint, fontSize: 11, marginTop: 2 } }, preset.summary || "")
+                  ),
+                  h("button", {
+                    style: { ...btnSmall, borderColor: "#2f6fed", color: "#2f6fed" },
+                    onClick: () => {
+                      set({ strategy: "custom", defaultPreset: preset.value });
+                      setMsg("默认档位已设为「" + preset.name + "」（还要点保存）");
+                    },
+                  }, cfg.strategy === "custom" && cfg.defaultPreset === preset.value ? "当前默认" : "用这个")
+                ))
+              )
         ),
 
         // ── 第 4 项：自定义预设 ─────────────────────────────────────────────
@@ -1208,13 +1261,24 @@ window.__ModuleLoader__.load({
 
       useEffect(() => { load(); }, [sessionId]);
 
-      const put = async (value) => {
+      // 一次覆盖 = 档位 + （仅 custom 档位）这份规格。写成对象，别把 prompt
+      // 单独塞进另一个字段 —— 两者必须一起落盘，否则"切档成功、prompt 丢了"。
+      const put = async (choice) => {
+        // 会话覆盖只认两种形态：别的档位写字符串；custom 档位写
+        // `{ strategy: "custom", preset: <值> }`。preset 值（builtin:/custom:名字）
+        // 绝不塞进 strategy 字段 —— 那会让服务端把它当档位名解析。
+        const raw = choice?.strategy || null;
+        const isCustom = raw !== null && String(raw).startsWith("custom");
+        const strategy = isCustom ? "custom" : raw;
+        const preset = isCustom
+          ? (choice?.preset || (String(raw).startsWith("custom:") ? String(raw).slice("custom:".length) : null))
+          : null;
         setBusy(true);
         try {
           const resp = await fetch(SESSION, {
             method: "PUT",
             headers: { ...GUARD, "content-type": "application/json" },
-            body: JSON.stringify({ sessionId, strategy: value || null }),
+            body: JSON.stringify({ sessionId, strategy, preset }),
           });
           const data = await resp.json().catch(() => null);
           if (resp.ok && data && alive.current) {
@@ -1233,20 +1297,30 @@ window.__ModuleLoader__.load({
       };
 
       /** 切档：有会话就立刻写；还没有会话就先记下来，等第一条消息落盘。 */
-      const choose = (value) => {
+      const choose = (strategy, preset = null) => {
+        const raw = strategy || null;
+        // 把 `custom:名字` 拆成 `{ strategy: "custom", preset: "custom:名字" }`，
+        // 让"档位"与"规格"两件事在落盘时就分开。
+        const isCustom = raw !== null && String(raw).startsWith("custom");
+        const choice = {
+          strategy: isCustom ? "custom" : raw,
+          preset: isCustom
+            ? (preset || (String(raw).startsWith("custom:") ? String(raw).slice("custom:".length) : null))
+            : null,
+        };
         if (!sessionId) {
-          setPending(value || null);
+          setPending(choice);
           return;
         }
-        put(value);
+        put(choice);
       };
 
       // 新会话：sessionId 一出现就把之前记下的选择写进去
       useEffect(() => {
         if (!sessionId || pending === null) return;
-        const value = pending;
+        const choice = pending;
         setPending(null);
-        put(value);
+        put(choice);
       }, [sessionId]);
 
       // 默认关：卡片里没开「会话级档位」时，顶栏不出现这一行（/iot 命令仍然可用）。
@@ -1254,7 +1328,13 @@ window.__ModuleLoader__.load({
       const override = state?.override
         ? typeof state.override === "object" ? String(state.override.strategy ?? "") : String(state.override)
         : "";
-      const current = override || pending || "";
+      const overridePreset = state?.override && typeof state.override === "object" && typeof state.override.preset === "string"
+        ? state.override.preset
+        : "";
+      const pendingStrategy = pending && typeof pending === "object" ? String(pending.strategy ?? "") : String(pending ?? "");
+      const pendingPreset = pending && typeof pending === "object" ? String(pending.preset ?? "") : "";
+      const current = override || pendingStrategy || "";
+      const currentPreset = overridePreset || pendingPreset || "";
       const route = state?.route ? state.route.id : "";
       // 「跟随 preset 默认」显示的是没有本会话覆盖时的结果（presetDefault），
       // 不是 route —— route 已经是"含覆盖的生效档位"。
@@ -1289,7 +1369,10 @@ window.__ModuleLoader__.load({
           onChange: (e) => {
             const tier = e.target.value;
             if (!tier) { choose(null); return; }
-            choose(tier === "custom" ? (current ? targetOf(current) : presets[0]?.value ?? "custom") : tier);
+            if (tier !== "custom") { choose(tier); return; }
+            // 切到 custom 时带上一份具体规格：沿用已有的，否则用清单里的第一项。
+            const fallback = current && tierOf(current) === "custom" ? targetOf(current) : presets[0]?.value ?? "custom";
+            choose(fallback, currentPreset || fallback);
           },
         },
           h("option", { value: "" }, presetDefault ? "跟随 preset 默认（" + presetDefault + "）" : "跟随 preset 默认"),
@@ -1299,8 +1382,9 @@ window.__ModuleLoader__.load({
           ? h("select", {
               value: targetOf(current),
               disabled: busy,
-              style: { ...selectStyle, maxWidth: 160 },
-              onChange: (e) => choose(e.target.value),
+              title: "本会话用哪一份规格（内置预设 / 目录里的文件 / 贴入的文本）",
+              style: { ...selectStyle, maxWidth: 190 },
+              onChange: (e) => choose(targetOf(current), e.target.value),
             },
               ...(presets.length
                 ? presets.map((entry) => h("option", { key: entry.value, value: entry.value }, entry.label))

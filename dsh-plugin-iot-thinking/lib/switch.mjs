@@ -1,6 +1,7 @@
 // /iot 命令的纯逻辑。与 HTTP 桥写同一张 sessions 表，语义必须一致。
 
 import { normalizeRouteEntry, resolveConfig } from "./route.mjs";
+import { builtinPresetById } from "./builtin-presets.mjs";
 import { strategyById, strategyIds } from "./strategies.mjs";
 
 /** 把一条路由（含来源）翻成人话；设置卡与命令共用。 */
@@ -63,30 +64,41 @@ export function switchSessionStrategy({ store, sessionId, preset, rawInput, mark
 
   // `custom:<文件名>` —— 第 4 项：`:` 后面是预设目录里的文件名；
   // 只写 `custom` 则用设置卡里贴进来的那段文本。
-  const [plainId, ...rest] = word.split(":");
+  // `preset:<名字>` = 切到 custom 档并指定这份规格（内置或目录里的文件）。
+  // 单独写 `custom:<名字>` 仍然可用；两者语义相同，后者是历史写法。
+  // 内置预设优先：`/iot preset:standard` 命中内置就写 builtin 形态；
+  // 没命中再当目录里的文件名（`custom:standard`）。这样用户不必记住前缀。
+  const presetName = word.startsWith("preset:") ? word.slice("preset:".length).trim() : "";
+  const presetWord = word.startsWith("preset:")
+    ? builtinPresetById(presetName)
+      ? `builtin:${presetName}`
+      : `custom:${presetName}`
+    : word;
+  const [plainId, ...rest] = presetWord.split(":");
   const arg = rest.join(":").trim();
-  const entry = normalizeRouteEntry(word) ?? normalizeRouteEntry(plainId);
+  const entry = normalizeRouteEntry(presetWord) ?? normalizeRouteEntry(plainId);
   if (!entry) {
     return { kind: "error", text: `未知策略「${plainId}」。可用：${ids.join(" / ")} / custom[:预设名] / auto` };
   }
   const strategy = strategyById(entry.id);
 
   if (entry.id === "custom") {
-    const name = entry.custom ?? null;
+    const name = entry.builtin ?? entry.custom ?? null;
     // 贴入文本（`custom` 不带名字）时，至少得有一段内容，否则等于静默关掉改写。
     if (!name && !String(store.load().customText ?? "").trim()) {
       return {
         kind: "error",
-        text: "还没贴入任何文本：要么 `/iot custom:<预设名>` 用目录里的文件，要么先在设置卡里贴一段。",
+        text: "还没贴入任何文本：要么 `/iot preset:<名字>` 用内置或目录里的预设，要么先在设置卡里贴一段。",
       };
     }
-    sessions[sessionId] = name ? `custom:${name}` : "custom";
+    if (entry.builtin) sessions[sessionId] = { strategy: "custom", preset: `builtin:${entry.builtin}` };
+    else sessions[sessionId] = name ? `custom:${name}` : "custom";
     store.save({ sessions });
     mark?.("strategy-switched", { sessionId, agentPreset: preset ?? null, strategy: "custom", preset: name, via: "command" });
     return {
       kind: "success",
       strategy: "custom",
-      text: `本会话已切到自定义预设（${name ?? "贴入的文本"}）。下一个模型请求生效。`,
+      text: `本会话已切到自定义预设（${name ?? "贴入的文本"}）。下一个请求生效。`,
     };
   }
 

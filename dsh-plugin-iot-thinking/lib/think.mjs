@@ -437,7 +437,11 @@ const LABEL_RULES = [
 ];
 
 function stripBullet(line) {
-  return line.replace(/^\s*(?:[-*•·]|\d+[.)])\s*/, "").trim();
+  // 全角标签【…】与方括号 [ … ] 在语义上是一回事：模型和用户模板都会混着写。
+  // 解析前先归一成方括号，否则 formatNodes 会把整行当成"没有标签的续行"，
+  // 节点计数、标签映射与 [中性] 预算全部失真。
+  const normalized = String(line ?? "").replace(/^\s*【([^】]+)】/, "[$1]");
+  return normalized.replace(/^\s*(?:[-*•·]|\d+[.)])\s*/, "").trim();
 }
 
 function normalizeLabel(line) {
