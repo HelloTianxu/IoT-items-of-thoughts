@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { migrateLegacyConfig, migrateRewriteConfig, normalizeRouteEntry } from "./route.mjs";
 import { normalizeEffort } from "./effort.mjs";
 import { DEFAULT_STRATEGY, strategyById } from "./strategies.mjs";
+import { builtinPresetById } from "./builtin-presets.mjs";
 
 export const DEFAULTS = Object.freeze({
   enabled: true,
@@ -46,8 +47,13 @@ export const DEFAULTS = Object.freeze({
    * 只在 custom 档位且没有会话/映射覆盖时使用；null = 沿用旧行为（贴入文本）。
    */
   defaultPreset: null,
+  /** 用户改过的内置预设正文：`{ "<id>": "文本" }`；没改的键不出现。 */
+  builtinOverrides: {},
   /** 单块改写调用的硬超时（毫秒）与总调用预算；不填用 lib/compress.mjs 的默认值。 */
   rewriteTimeoutMs: undefined,
+  /** custom 档位的输出预算（字符数）与"输出里不许出现 think 标签"开关。 */
+  maxOut: undefined,
+  noThink: true,
   rewriteBudget: undefined,
   // 旧形状，只读兼容：load() 会把它们搬进 rewrite 并删键。
   provider: undefined,
@@ -121,6 +127,18 @@ function strategyMap(value) {
   return out;
 }
 
+/** 内置预设覆盖：键必须是存在的内置 id，值是字符串；空串等于恢复默认（删键）。 */
+function builtinOverridesMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out = {};
+  for (const [id, text] of Object.entries(value)) {
+    if (!builtinPresetById(id)) continue;
+    if (typeof text !== "string" || !text.trim()) continue;
+    out[id] = text;
+  }
+  return out;
+}
+
 /** 逐策略覆盖：只收对象值，非法策略 id 丢弃。 */
 function strategiesMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -161,6 +179,7 @@ function merge(base, overlay) {
   out.agentPresets = strategyMap(out.agentPresets);
   out.sessions = strategyMap(out.sessions);
   out.rewrite = rewriteConfig(out.rewrite);
+  out.builtinOverrides = builtinOverridesMap(out.builtinOverrides);
   return out;
 }
 

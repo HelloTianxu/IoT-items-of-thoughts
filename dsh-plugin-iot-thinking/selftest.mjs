@@ -40,6 +40,7 @@ import { defaultNodeModulesRoots, rootFromEntryPath, versionedRoots } from "./li
 import { guardRequest, redactEvents, registerConfigApi } from "./lib/config-api.mjs";
 import { mark } from "./lib/ledger.mjs";
 import { ConfigStore } from "./lib/config-store.mjs";
+import { builtinPresetText } from "./lib/builtin-presets.mjs";
 import { BUILTIN_PRESETS, builtinPresetById, builtinPresetCatalog } from "./lib/builtin-presets.mjs";
 import { migrateLegacyConfig, migrateRewriteConfig, resolveConfig, resolveRewriteRoute, resolveRoute, strategyCatalog } from "./lib/route.mjs";
 import {
@@ -1694,6 +1695,92 @@ await check("卸载：压缩调用真的发往配置的路由，并记账 offloa
   assert.equal(routeEvent.source, "config");
   assert.equal(result.event.provider, "local-p", "记账要写实际用过的路由");
   assert.equal(result.event.routeSource, "config");
+});
+
+await check("noThink：输出里出现 think 标签即判失败，且只重试一次", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([
+          { type: "text-delta", index: 0, text: "<thinking>我再想想</thinking>\n[决定] 先这样。" },
+          { type: "finish", reason: { kind: "stop" } },
+        ]);
+      },
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { noThink: true, rewriteBudget: 3 }, events, text: DRAFT.repeat(2) });
+  assert.equal(result, null, "两次都带 think 标签就保留原文");
+  assert.equal(calls.length, 2, "只重试一次");
+  assert.ok(events.some((entry) => entry.event === "thinking-think-tag" && entry.retried === false));
+  assert.ok(events.some((entry) => entry.event === "thinking-think-tag" && entry.retried === true));
+});
+
+await check("noThink 关闭：带 think 标签的输出照常接受", async () => {
+  const ctx = {
+    llm: {
+      stream: () => chunks([
+        { type: "text-delta", index: 0, text: "<thinking>想一下</thinking>\n[决定] 先这样。" },
+        { type: "finish", reason: { kind: "stop" } },
+      ]),
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { noThink: false, rewriteBudget: 2 }, text: DRAFT.repeat(2) });
+  assert.ok(result && result.text.includes("[决定]"));
+});
+
+await check("maxOut：超过字数预算判 over-budget，按原因重试一次而不是硬截断", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: () => chunks([
+        { type: "text-delta", index: 0, text: "【决定】" + "很长的结论".repeat(50) },
+        { type: "finish", reason: { kind: "stop" } },
+      ]),
+    },
+  };
+  const result = await compressWith(ctx, {
+    cfg: { strategy: "custom", rewriteBudget: 2, limits: { ...limitsOf("custom"), maxOut: 50, preset: { inline: "压短", name: "inline" }, acceptRule: "different" } },
+    events,
+    text: DRAFT.repeat(2),
+  });
+  assert.equal(result, null, "超预算两次就保留原文");
+  assert.ok(events.some((entry) => entry.event === "thinking-rejected" && entry.reason === "over-budget"));
+});
+
+await check("截断：max-tokens 直接停止，不再降级重试", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([{ type: "finish", reason: { kind: "max-tokens" } }]);
+      },
+    },
+  };
+  await compressWith(ctx, { cfg: { rewriteBudget: 4 }, events });
+  assert.equal(calls.length, 1, "截断不该再打第二次");
+  assert.ok(events.some((entry) => entry.event === "thinking-truncated"));
+});
+
+await check("内置预设可编辑：覆盖文本优先，恢复默认后回到原文", () => {
+  const overrides = { standard: "我的压缩规则：只输出一行。" };
+  assert.equal(builtinPresetText("standard", overrides), "我的压缩规则：只输出一行。");
+  assert.ok(builtinPresetText("standard", {}).includes("【决定】"), "没覆盖就用默认正文");
+  const resolved = resolveConfig({ strategy: "custom", defaultPreset: "builtin:standard", builtinOverrides: overrides }, { sessionId: "s" });
+  const prepared = strategyById("custom").prepare(resolved.limits);
+  assert.equal(prepared.state.text, "我的压缩规则：只输出一行。");
+  assert.equal(prepared.state.edited, true);
+});
+
+await check("输出纪律注入：预算与 noThink 会写进提示词", () => {
+  const prompt = buildCustomPrompt("压短", "草稿", { limits: { maxOut: 600, noThink: true } });
+  assert.ok(prompt.includes("不超过 600 个字符"));
+  assert.ok(prompt.includes("<thinking>"));
+  assert.ok(prompt.includes("不要解释你的过程"));
 });
 
 await check("改写超时：模型一直吐字不结束，到点放弃并保留原文（不挂住会话）", async () => {

@@ -129,13 +129,14 @@ export function resetPresetCache() {
  * 预设文本 → 提示词。
  * 不含 `{{draft}}` 时按"指令体"处理（引擎包 `<thinking>`）；含它则整段当模板。
  */
-export function buildCustomPrompt(presetText, draft, { strict = false, reason = null, detail = null } = {}) {
+export function buildCustomPrompt(presetText, draft, { strict = false, reason = null, detail = null, limits = null } = {}) {
   const body = String(presetText ?? "").trim();
   const text = String(draft ?? "");
   if (!body) return "";
   const retry = strict ? strictDirective(reason, detail) : "";
+  const discipline = outputDiscipline(limits);
   if (body.includes("{{draft}}")) {
-    return `${body.split("{{draft}}").join(text)}${retry ? `\n\n${retry}` : ""}`;
+    return `${body.split("{{draft}}").join(text)}${discipline ? `\n\n${discipline}` : ""}${retry ? `\n\n${retry}` : ""}`;
   }
   return [
     body,
@@ -145,11 +146,36 @@ export function buildCustomPrompt(presetText, draft, { strict = false, reason = 
     "</thinking>",
     "",
     "现在只输出改写后的内容，不要解释、不要前言、不要重复这段指令。",
+    discipline,
     retry,
   ]
     .filter((line, i, arr) => !(line === "" && arr[i - 1] === ""))
     .join("\n")
     .trim();
+}
+
+/**
+ * 输出纪律：把"写多少、写什么、不许写什么"放在预设正文之后。
+ *
+ * 为什么不只依赖预设文本：预设是用户写的自由文本，模型可能忽略其中的预算；
+ * 而超预算的后果是**截断**（max-tokens），截断后重试只会再截一次。所以这里
+ * 用一段固定的、可机检的约束把边界说死：条数、字数、禁止思考标签。
+ */
+export function outputDiscipline(limits = null) {
+  const maxOut = Number.isFinite(limits?.maxOut) ? Math.max(0, Math.floor(limits.maxOut)) : 0;
+  const noThink = limits?.noThink === true;
+  const rules = [
+    "输出纪律（优先于上文任何风格要求）：",
+    "1. 只输出最终结果本身，不要解释你的过程，不要复述指令，不要开场白/结束语。",
+    "2. 直接按标签分行输出；不要 JSON、不要代码块、不要编号。",
+  ];
+  if (maxOut > 0) {
+    rules.push(`3. 总长度不超过 ${maxOut} 个字符；超了就删次要条目，不要靠换行凑长度。`);
+  }
+  if (noThink) {
+    rules.push("4. 输出里**不要出现** `<thinking>` / `<think>` / `[思考]` 这类标签——你不是在思考，你是在给结论。");
+  }
+  return rules.join("\n");
 }
 
 function strictDirective(reason, detail) {
@@ -164,6 +190,10 @@ function strictDirective(reason, detail) {
       return "上一版不比原文短。压到预设要求的长度以内。";
     case "empty":
       return "上一版是空的。草稿里有内容，写出来。";
+    case "over-budget":
+      return `上一版写超了（超过 ${detail ?? "预算"} 个字符）。删掉次要条目与解释，只留结论；不要靠换行凑长度。`;
+    case "has-think-tag":
+      return "上一版里出现了 `<thinking>` / `<think>` / `[思考]` 标签。不要输出思考过程，只输出最终结论。";
     default:
       return `上一版不合格${detail ? `（${detail}）` : ""}。重写。`;
   }

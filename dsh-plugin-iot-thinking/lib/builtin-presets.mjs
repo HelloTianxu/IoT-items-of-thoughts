@@ -110,6 +110,18 @@ export const BUILTIN_PRESETS = Object.freeze([
 
 const BY_ID = new Map(BUILTIN_PRESETS.map((preset) => [preset.id, preset]));
 
+/**
+ * 用户对内置预设的覆盖：内置只是**默认文本**，不是不可改的常量。
+ * 覆盖存在 config.builtinOverrides[<id>]；读的时候优先用覆盖，原文仍保留在
+ * 模块里，随时可以"恢复默认"。
+ */
+export function builtinPresetText(id, overrides = {}) {
+  const preset = builtinPresetById(id);
+  if (!preset) return null;
+  const override = overrides && typeof overrides === "object" ? overrides[preset.id] : undefined;
+  return typeof override === "string" && override.trim() ? override : preset.text;
+}
+
 /** `builtin:<id>` 或裸 id 都认；不存在返回 null。 */
 export function builtinPresetById(id) {
   const key = String(id ?? "").trim().replace(/^builtin:/, "");
@@ -126,5 +138,7 @@ export function builtinPresetCatalog() {
     accept: preset.accept,
     minChars: preset.minChars,
     bytes: Buffer.byteLength(preset.text, "utf8"),
+    /** 默认正文：卡片编辑器要能在"还没覆盖"时把原文显示出来。 */
+    text: preset.text,
   }));
 }

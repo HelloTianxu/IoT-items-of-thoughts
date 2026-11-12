@@ -273,6 +273,22 @@ function sanitize(payload) {
   if (typeof payload.presetDir === "string") next.presetDir = payload.presetDir.trim();
   if (typeof payload.customText === "string") next.customText = payload.customText;
   if (payload.presetAccept === "shorter" || payload.presetAccept === "different") next.presetAccept = payload.presetAccept;
+  // 内置预设的用户覆盖：`{ "<id>": "正文" }`；空串 = 恢复默认（删键）。
+  if (payload.builtinOverrides !== undefined) {
+    const out = {};
+    const source = payload.builtinOverrides && typeof payload.builtinOverrides === "object" && !Array.isArray(payload.builtinOverrides)
+      ? payload.builtinOverrides
+      : {};
+    for (const [id, text] of Object.entries(source)) {
+      if (!builtinPresetById(id)) continue;
+      if (typeof text !== "string" || !text.trim()) continue;
+      out[id] = text.slice(0, 64 * 1024);
+    }
+    next.builtinOverrides = out;
+  }
+  // 输出预算与"不许在输出里思考"：只对 custom 档位生效。
+  if (Number.isFinite(payload.maxOut)) next.maxOut = Math.max(0, Math.floor(payload.maxOut));
+  if (typeof payload.noThink === "boolean") next.noThink = payload.noThink;
   // 全局默认的"自定义预设"：`builtin:<id>` / `custom:<文件名>` / `custom`（贴入文本）。
   // 只收这三种形态，其它一律丢弃（写进去也不会被 resolveConfig 用上）。
   if (payload.defaultPreset === null) {

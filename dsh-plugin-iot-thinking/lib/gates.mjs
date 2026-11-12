@@ -23,15 +23,31 @@ export function isDegenerate(text) {
 }
 
 /**
+ * 压缩器把"思考"写回正文的痕迹：`<thinking>` / `<think>` / `[思考]` / `思考：`。
+ *
+ * 压缩器的任务是**只输出结论**。一旦输出里出现这些标记，说明它在输出里又开始
+ * 推理了 —— 这类输出通常又长又碎，是超时与截断的主要来源。
+ * 检测放在裁决里，而不是靠提示词"请求"它别想：模型不遵守时要有确定性后果。
+ */
+const THINK_TAG = /<\/?think(?:ing)?\b[^>]*>|\[思考\]|^\s*思考\s*[:：]/imu;
+
+export function hasThinkTag(text) {
+  return THINK_TAG.test(String(text ?? ""));
+}
+
+/**
  * 一次改写结果的裁决。
  * @param {string} text - 模型给出的内容（已 trim）。
- * @param {{ original?: string, minOut?: number }} [options]
+ * @param {{ original?: string, minOut?: number, maxOut?: number, noThink?: boolean }} [options]
  */
-export function judge(text, { original = "", minOut = 4 } = {}) {
+export function judge(text, { original = "", minOut = 4, maxOut = 0, noThink = false } = {}) {
   const out = String(text ?? "").trim();
   if (!out) return { ok: false, reason: "empty" };
+  if (noThink && hasThinkTag(out)) return { ok: false, reason: "has-think-tag" };
   if (out === String(original ?? "").trim()) return { ok: false, reason: "unchanged" };
   if (out.length < minOut) return { ok: false, reason: "too-thin" };
+  // 软预算：超过就是"写多了"，不在这里截断 —— 交给上层按原因重试一次。
+  if (Number.isFinite(maxOut) && maxOut > 0 && out.length > maxOut) return { ok: false, reason: "over-budget" };
   if (isDegenerate(out)) return { ok: false, reason: "degenerate" };
   return { ok: true };
 }

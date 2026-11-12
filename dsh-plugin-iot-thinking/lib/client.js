@@ -231,6 +231,8 @@ window.__ModuleLoader__.load({
       const [presetFiles, setPresetFiles] = useState([]);
       /** 内置预设（随插件发布，只读）：清单来自 /api/status 的 choices。 */
       const [builtinPresets, setBuiltinPresets] = useState([]);
+      /** 正在编辑的内置预设：{ id, text }；text 为空表示"还没动"。 */
+      const [builtinEditor, setBuiltinEditor] = useState({ id: "", text: "" });
       const [presetDirSet, setPresetDirSet] = useState(false);
       /** 正在编辑的预设：`{ name, text }`；name 为空表示"还没起名"。 */
       const [editor, setEditor] = useState({ name: "", text: "", note: null });
@@ -922,10 +924,10 @@ window.__ModuleLoader__.load({
         h("div", { style: section },
           h("div", { style: sectionHead },
             h("div", { style: sectionTitle }, "内置预设（开箱即用）"),
-            h("span", { style: hint }, "只读 · 随插件发布")
+            h("span", { style: hint }, "默认文本可编辑 · 随插件发布")
           ),
           h("div", { style: { ...hint, marginTop: 4 } },
-            "不想自己写规格时，直接点一个。它们只在「自定义预设」档位下生效：点「用这个」会同时把默认档位切到自定义预设。"),
+            "不想自己写规格时，直接点一个。它们只在「自定义预设」档位下生效：点「用这个」会同时把默认档位切到自定义预设。正文可以改——改过的正文存在配置里，随时能恢复默认。"),
           builtinPresets.length === 0
             ? h("div", { style: { ...hint, marginTop: 6 } }, "宿主没有下发内置清单（旧版本或 headless 组合）。")
             : h("div", { style: { border: "1px solid var(--dsw-alias-border-l2, #e6e9ee)", borderRadius: 8, overflow: "hidden", marginTop: 8 } },
@@ -944,15 +946,57 @@ window.__ModuleLoader__.load({
                     h("div", { style: { ...monoLabel, fontWeight: 600 } }, preset.name),
                     h("div", { style: { ...hint, fontSize: 11, marginTop: 2 } }, preset.summary || "")
                   ),
-                  h("button", {
-                    style: { ...btnSmall, borderColor: "#2f6fed", color: "#2f6fed" },
-                    onClick: () => {
-                      set({ strategy: "custom", defaultPreset: preset.value });
-                      setMsg("默认档位已设为「" + preset.name + "」（还要点保存）");
-                    },
-                  }, cfg.strategy === "custom" && cfg.defaultPreset === preset.value ? "当前默认" : "用这个")
+                  h("div", { style: { display: "flex", gap: 6, flexShrink: 0 } },
+                    h("button", {
+                      style: btnSmall,
+                      onClick: () => setBuiltinEditor({ id: preset.id, text: (cfg.builtinOverrides ?? {})[preset.id] ?? preset.text ?? "" }),
+                    }, "编辑"),
+                    h("button", {
+                      style: { ...btnSmall, borderColor: "#2f6fed", color: "#2f6fed" },
+                      onClick: () => {
+                        set({ strategy: "custom", defaultPreset: preset.value });
+                        setMsg("默认档位已设为「" + preset.name + "」（还要点保存）");
+                      },
+                    }, cfg.strategy === "custom" && cfg.defaultPreset === preset.value ? "当前默认" : "用这个")
+                  )
                 ))
               )
+          ,
+          builtinEditor.id
+            ? h("div", { style: panel },
+                h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 } },
+                  h("div", { style: fieldName }, "编辑内置预设：" + builtinEditor.id),
+                  h("div", { style: { display: "flex", gap: 6 } },
+                    h("button", {
+                      style: btnSmall,
+                      onClick: () => {
+                        const next = { ...(cfg.builtinOverrides ?? {}) };
+                        delete next[builtinEditor.id];
+                        set({ builtinOverrides: next });
+                        setBuiltinEditor({ id: "", text: "" });
+                        setMsg("已恢复默认正文（还要点保存）");
+                      },
+                    }, "恢复默认"),
+                    h("button", { style: btnSmall, onClick: () => setBuiltinEditor({ id: "", text: "" }) }, "关闭")
+                  )
+                ),
+                h("textarea", {
+                  value: builtinEditor.text || ((cfg.builtinOverrides ?? {})[builtinEditor.id] ?? ""),
+                  rows: 12,
+                  placeholder: "留空 = 用插件自带的默认正文；写入内容后覆盖默认。",
+                  style: textareaStyle,
+                  onChange: (e) => {
+                    const next = { ...(cfg.builtinOverrides ?? {}) };
+                    const text = e.target.value;
+                    if (text.trim()) next[builtinEditor.id] = text;
+                    else delete next[builtinEditor.id];
+                    set({ builtinOverrides: next });
+                    setBuiltinEditor({ id: builtinEditor.id, text });
+                  },
+                }),
+                h("div", { style: { ...hint, marginTop: 6 } }, "内置正文只是默认值：改过的内容存在配置里，保存后下一个请求生效。")
+              )
+            : null
         ),
 
         // ── 第 4 项：自定义预设 ─────────────────────────────────────────────
@@ -1188,6 +1232,29 @@ window.__ModuleLoader__.load({
                 onChange: (e) => set({ rewriteBudget: e.target.value === "" ? null : Number(e.target.value) }),
               }),
               h("span", { style: { ...hint, fontSize: 11 } }, "effort 降级 + 重试 + 回退叠起来会让一块打很多次；这里给整块一个硬上限。")
+            )
+          ),
+          h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 } },
+            h("label", { style: { display: "flex", alignItems: "center", gap: 6, ...hint, cursor: "pointer" } },
+              h("input", {
+                type: "checkbox",
+                checked: cfg.noThink !== false,
+                onChange: (e) => set({ noThink: e.target.checked }),
+              }),
+              "禁止压缩器在输出里「思考」（出现 think 标签即判失败）"
+            ),
+            h("label", { style: limitCell },
+              h("span", { style: fieldName }, "输出字数上限（custom 档位）"),
+              h("input", {
+                type: "number",
+                min: 0,
+                step: 100,
+                placeholder: "0 = 不限制",
+                value: cfg.maxOut ?? "",
+                style: { ...input, width: "100%", boxSizing: "border-box" },
+                onChange: (e) => set({ maxOut: e.target.value === "" ? null : Number(e.target.value) }),
+              }),
+              h("span", { style: { ...hint, fontSize: 11 } }, "超过就按「写多了」重试一次，而不是硬截断。")
             )
           ),
           h("div", { style: { ...hint, marginTop: 14 } }, "按档位覆盖（可选）：让某一档单独走另一条路由；provider/model 留空就跟随上面的设置。"),

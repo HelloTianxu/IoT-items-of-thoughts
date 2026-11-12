@@ -11,6 +11,7 @@ import {
   rememberEffortPlan,
 } from "./effort.mjs";
 import { DEFAULT_STRATEGY, limitsOf, strategyById } from "./strategies.mjs";
+import { hasThinkTag } from "./gates.mjs";
 import { isOffloaded, normalizeRouteTarget, resolveRewriteRoute } from "./route.mjs";
 
 /** 改写结果 + 账本载荷。是否真的替换由 stream.mjs 判定后写进 replaced。 */
@@ -264,6 +265,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     const known = knownEffortPlan(key);
     const send = known !== undefined ? known : mode === AUTO_EFFORT ? "off" : mode;
     let result = await run(instruction, temperatureForCall, send, target);
+    // 截断先于 effort 降级判断：换档位不解决输出预算，继续降级只会再截一次。
+    if (result.finish && result.finish.kind === "max-tokens") return result;
     if (!result.error || !isUnsupportedEffortFailure(result)) return result;
 
     // `null` means "send no effort at all". If even that is refused, the adapter's
@@ -396,6 +399,35 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       return { done: true, value: null };
     }
 
+    // 截断不是"内容不合格"，是输出预算不够。重试/降级都解决不了它 ——
+    // 继续打只会让同一块反复吐字、反复被截断，正是用户看到的恶性循环。
+    if (result.finish && result.finish.kind === "max-tokens") {
+      mark("thinking-truncated", {
+        index,
+        strategy: strategy.id,
+        stage,
+        charsIn: text.length,
+        charsOut: String(result.output ?? "").trim().length,
+        maxTokens,
+        retried: strict,
+        action: "stop",
+      });
+      return { done: true, value: null };
+    }
+
+    // "输出里不许思考"是跨档位的硬约束：放在 finalize 之前统一拦，
+    // 不依赖某个档位的实现。命中就按原因重试一次，第二次仍命中则放弃。
+    if (cfg.noThink !== false && hasThinkTag(result.output)) {
+      mark("thinking-think-tag", {
+        index,
+        strategy: strategy.id,
+        stage,
+        retried: strict,
+        charsOut: String(result.output ?? "").trim().length,
+      });
+      return { done: false, reason: "has-think-tag", detail: "output", finish: result.finish };
+    }
+
     const verdict = strategy.finalize(result.output, { original: text, limits, state, recent });
     if (verdict.ok) {
       // 防御：档位没回 text 时（自定义预设早期版本就这样）退回原始输出，不在这里抛。
@@ -464,6 +496,21 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     // 重试本身没拿到结果（报错/中止）：回原文。改写器没给出结果时拿兜底内容
     // 替换正文，等于把"没改好"降级成"内容被砍成两句"——那比不改糟。
     return second.value;
+  }
+
+  // "输出里在思考"两次都犯：直接保留原文，不要用确定性兜底顶替。
+  // 兜底内容虽然不带标签，但它不是模型按预设改写的，拿它替换等于掩盖了失败。
+  if (second.reason === "has-think-tag") {
+    mark("thinking-think-tag-skip", {
+      index,
+      strategy: strategy.id,
+      stage: "output",
+      charsIn: text.length,
+      charsOut: 0,
+      retried: true,
+      action: "skip",
+    });
+    return null;
   }
 
   // 两次都不过：items 家族有确定性兜底（宁可给两条真节点，也不把循环写回会话）；

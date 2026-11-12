@@ -128,7 +128,12 @@ export function resolveConfig(cfg, who = {}) {
       // 内置预设：只读、随插件发布，不需要 presetDir。替换规则由预设自己定
       // （内置的全部要求"必须更短"），不受全局 presetAccept 影响。
       const preset = builtinPresetById(route.builtin);
-      limits.preset = { kind: "builtin", name: route.builtin };
+      limits.preset = {
+        kind: "builtin",
+        name: route.builtin,
+        // 用户改过的正文随 preset 一起带下去；没改就是模块里的默认文本。
+        overrides: base.builtinOverrides && typeof base.builtinOverrides === "object" ? base.builtinOverrides : {},
+      };
       limits.acceptRule = preset?.accept === "shorter" ? "shorter" : "different";
       // 预设自带的最小字符数只是下限：用户在 strategies.custom 里配的值更大时以用户为准。
       if (preset && Number.isFinite(preset.minChars)) limits.minChars = Math.max(limits.minChars ?? 0, preset.minChars);
@@ -141,7 +146,11 @@ export function resolveConfig(cfg, who = {}) {
       const fallbackPreset = normalizeRouteEntry(base.defaultPreset);
       if (fallbackPreset?.builtin) {
         const preset = builtinPresetById(fallbackPreset.builtin);
-        limits.preset = { kind: "builtin", name: fallbackPreset.builtin };
+        limits.preset = {
+          kind: "builtin",
+          name: fallbackPreset.builtin,
+          overrides: base.builtinOverrides && typeof base.builtinOverrides === "object" ? base.builtinOverrides : {},
+        };
         limits.acceptRule = preset?.accept === "shorter" ? "shorter" : "different";
         if (preset && Number.isFinite(preset.minChars)) limits.minChars = Math.max(limits.minChars ?? 0, preset.minChars);
       } else if (fallbackPreset?.custom) {
@@ -152,6 +161,12 @@ export function resolveConfig(cfg, who = {}) {
         limits.acceptRule = base.presetAccept === "shorter" ? "shorter" : "different";
       }
     }
+  }
+
+  // custom 档位的输出约束：只对自定义预设生效（三档基础模式有自己的节点预算）。
+  if (route.id === "custom") {
+    if (Number.isFinite(base.maxOut)) limits.maxOut = Math.max(0, Math.floor(base.maxOut));
+    if (base.noThink === true) limits.noThink = true;
   }
 
   const off = strategy?.family === "off";
