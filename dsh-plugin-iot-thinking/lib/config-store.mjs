@@ -46,6 +46,9 @@ export const DEFAULTS = Object.freeze({
    * 只在 custom 档位且没有会话/映射覆盖时使用；null = 沿用旧行为（贴入文本）。
    */
   defaultPreset: null,
+  /** 单块改写调用的硬超时（毫秒）与总调用预算；不填用 lib/compress.mjs 的默认值。 */
+  rewriteTimeoutMs: undefined,
+  rewriteBudget: undefined,
   // 旧形状，只读兼容：load() 会把它们搬进 rewrite 并删键。
   provider: undefined,
   model: undefined,

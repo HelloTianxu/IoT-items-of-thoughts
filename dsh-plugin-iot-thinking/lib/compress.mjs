@@ -21,6 +21,25 @@ function rewritten(text, payload) {
 /** 目录查询只是建议，不能卡住响应；测试会调小它。 */
 export const EFFORT_PROBE = { timeoutMs: 3000 };
 
+/**
+ * 改写调用的硬上限。
+ *
+ * 没有这个上限时，模型"一直吐字但永不 finish"会让块结束路径一直等下去：
+ * 客户端看到的是思考卡住，随后又被重试/回退放大成连续失败。
+ * 默认 120s 是给本地大模型留的余量（27B 单块实测 30~45s）；超时后按失败处理，
+ * 原文由 stream.mjs 原样放行 —— 宁可这一块不改写，也不能把会话挂住。
+ */
+export const REWRITE_TIMEOUT = { defaultMs: 120000, minMs: 1000, maxMs: 600000 };
+
+/**
+ * 单块调用的总预算。
+ *
+ * 重试本身不是问题，叠起来才是：effort 降级（最多 3 次）+ 首轮 + 重试 +
+ * 回退（2 次）能让一块打到 7 次模型调用，用户看到的就是"一直吐字、一直失败"。
+ * 这里给整块一个硬上限，超出即保留原文并记账。
+ */
+export const REWRITE_BUDGET = { defaultCalls: 4, minCalls: 1, maxCalls: 8 };
+
 /** 超时即拒，且不留下挂住的 timer。 */
 function withTimeout(promise, timeoutMs, label) {
   return new Promise((resolve, reject) => {
@@ -115,10 +134,36 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   let effortFallback = false;
   let called = false;
 
+  const configuredCalls = Number(cfg.rewriteBudget);
+  const maxCalls = Number.isFinite(configuredCalls)
+    ? Math.min(REWRITE_BUDGET.maxCalls, Math.max(REWRITE_BUDGET.minCalls, Math.floor(configuredCalls)))
+    : REWRITE_BUDGET.defaultCalls;
+  /** 这一块已经发出去的调用数；超过预算就不再发。 */
+  let callCount = 0;
+  const overBudget = () => callCount >= maxCalls;
+
+  const configuredTimeout = Number(cfg.rewriteTimeoutMs);
+  const rewriteTimeoutMs = Number.isFinite(configuredTimeout)
+    ? Math.min(REWRITE_TIMEOUT.maxMs, Math.max(REWRITE_TIMEOUT.minMs, Math.floor(configuredTimeout)))
+    : REWRITE_TIMEOUT.defaultMs;
+
   const run = async (instruction, temperatureForCall, effort, target) => {
+    if (overBudget()) {
+      return { error: `本块调用预算已用尽（${maxCalls} 次）`, code: "REWRITE_BUDGET", finish: undefined };
+    }
+    callCount += 1;
     const assembler = new Llm.BlockAssembler();
     effortSent = effort;
     called = true;
+    // 超时要真的把请求停掉，否则后台还在吐字、白烧 token。
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const signal = controller?.signal ?? options.signal;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller?.abort?.();
+    }, rewriteTimeoutMs);
+    timer.unref?.();
     try {
       const stream = ctx.llm.stream({
         provider: target.provider,
@@ -136,13 +181,25 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         sessionId: options.sessionId,
         // 辅助调用：合法的 purpose，且不是 agent-loop 请求，所以自己的钩子会忽略它。
         purpose: "compaction",
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(signal === undefined ? {} : { signal }),
       });
       for await (const chunk of stream) assembler.push(chunk);
     } catch (error) {
+      clearTimeout(timer);
       return {
-        error: String(error?.message ?? error),
-        code: typeof error?.code === "string" ? error.code : undefined,
+        error: timedOut
+          ? `改写调用超时（${rewriteTimeoutMs} ms），已放弃这一块并保留原文`
+          : String(error?.message ?? error),
+        code: timedOut ? "REWRITE_TIMEOUT" : typeof error?.code === "string" ? error.code : undefined,
+        finish: assembler.finish,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+    if (timedOut) {
+      return {
+        error: `改写调用超时（${rewriteTimeoutMs} ms），已放弃这一块并保留原文`,
+        code: "REWRITE_TIMEOUT",
         finish: assembler.finish,
       };
     }

@@ -265,6 +265,8 @@ function sanitize(payload) {
   if (payload.sessions !== undefined) next.sessions = strategyTable(payload.sessions);
   if (payload.strategies !== undefined) next.strategies = payload.strategies;
   if (Number.isFinite(payload.maxChars)) next.maxChars = Math.max(1, Math.floor(payload.maxChars));
+  if (Number.isFinite(payload.rewriteTimeoutMs)) next.rewriteTimeoutMs = Math.max(1000, Math.floor(payload.rewriteTimeoutMs));
+  if (Number.isFinite(payload.rewriteBudget)) next.rewriteBudget = Math.max(1, Math.floor(payload.rewriteBudget));
   if (typeof payload.archive === "boolean") next.archive = payload.archive;
   if (typeof payload.sessionSwitch === "boolean") next.sessionSwitch = payload.sessionSwitch;
   // 自定义预设三件：目录、贴入的文本、替换规则。

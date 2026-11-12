@@ -157,6 +157,22 @@ window.__ModuleLoader__.load({
       return patch;
     }
 
+    /**
+     * 切档时的"目标值"合成：切到 custom 时不能沿用旧档位的 target
+     * （`targetOf("iot-balanced")` 返回 "iot-balanced"，会被当成预设名，
+     * 结果 strategy 仍是原档位 —— 用户看到"选了预设但没生效"）。
+     * 抽成纯函数是为了让这条规则能被自测直接覆盖。
+     *
+     * @param {string} tier
+     * @param {string} target
+     * @param {() => string} firstCustom
+     */
+    function composeTier(tier, target, firstCustom) {
+      if (tier !== "custom") return tier;
+      if (typeof target === "string" && (target === "custom" || target.startsWith("custom:"))) return target;
+      return firstCustom();
+    }
+
     const sectionHead = { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 };
     const limitsGrid = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12, marginTop: 10 };
     const limitCell = { display: "flex", flexDirection: "column", gap: 4, minWidth: 0 };
@@ -582,7 +598,7 @@ window.__ModuleLoader__.load({
       const targetOf = (value) => (typeof value === "string" && value.startsWith("custom:") ? value : "custom");
       const firstCustom = () => (presetChoices[0] ? presetChoices[0].value : "custom");
       // 切到"自定义预设"时给一个真实可用值：原来的 target 不是具体文件就用第一个文件。
-      const compose = (tier, target) => (tier === "custom" ? (target && target !== "custom" ? target : firstCustom()) : tier);
+      const compose = (tier, target) => composeTier(tier, target, firstCustom);
       const choiceLabel = (value) => {
         const tier = tiers.find((entry) => entry.value === tierOf(value));
         if (tierOf(value) !== "custom") return tier ? tier.label : value;
@@ -1146,6 +1162,34 @@ window.__ModuleLoader__.load({
               h("option", { value: "session" }, "回退到会话路由再试一次")
             )
           ),
+          h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 } },
+            h("label", { style: limitCell },
+              h("span", { style: fieldName }, "单次改写超时（毫秒）"),
+              h("input", {
+                type: "number",
+                min: 1000,
+                step: 1000,
+                placeholder: "默认 120000",
+                value: cfg.rewriteTimeoutMs ?? "",
+                style: { ...input, width: "100%", boxSizing: "border-box" },
+                onChange: (e) => set({ rewriteTimeoutMs: e.target.value === "" ? null : Number(e.target.value) }),
+              }),
+              h("span", { style: { ...hint, fontSize: 11 } }, "模型一直吐字不结束时，到点放弃并保留原文，不再挂住会话。")
+            ),
+            h("label", { style: limitCell },
+              h("span", { style: fieldName }, "单块调用预算（次）"),
+              h("input", {
+                type: "number",
+                min: 1,
+                step: 1,
+                placeholder: "默认 4",
+                value: cfg.rewriteBudget ?? "",
+                style: { ...input, width: "100%", boxSizing: "border-box" },
+                onChange: (e) => set({ rewriteBudget: e.target.value === "" ? null : Number(e.target.value) }),
+              }),
+              h("span", { style: { ...hint, fontSize: 11 } }, "effort 降级 + 重试 + 回退叠起来会让一块打很多次；这里给整块一个硬上限。")
+            )
+          ),
           h("div", { style: { ...hint, marginTop: 14 } }, "按档位覆盖（可选）：让某一档单独走另一条路由；provider/model 留空就跟随上面的设置。"),
           h("div", { style: mappingTable },
             h("div", { style: { ...mappingRow, ...mappingHeadRow, gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)" } },
@@ -1427,6 +1471,7 @@ window.__ModuleLoader__.load({
     module.exports.IotStrategySeat = IotStrategySeat;
     module.exports.changedFields = changedFields;
     module.exports.presetOptions = presetOptions;
+    module.exports.composeTier = composeTier;
     return module.exports;
   },
 });

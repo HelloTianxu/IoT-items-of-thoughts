@@ -5,7 +5,8 @@
  *   node selftest.mjs
  */
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import vm from "node:vm";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +24,7 @@ import {
   isDegenerateItems,
   sanitizeDraft,
 } from "./lib/think.mjs";
-import { compressThinking, EFFORT_PROBE } from "./lib/compress.mjs";
+import { compressThinking, EFFORT_PROBE, REWRITE_BUDGET, REWRITE_TIMEOUT } from "./lib/compress.mjs";
 import {
   AUTO_EFFORT,
   EFFORT_IDS,
@@ -1509,6 +1510,53 @@ await check("改写器路由：只填 provider 不算配了，继续往下掉一
   assert.equal(route.provider, "session-p");
 });
 
+/** 客户端 bundle 是 plain JS，靠 __ModuleLoader__ 加载；这里用最小垫片取纯函数。 */
+function loadClientBundle() {
+  const source = readFileSync(join(process.cwd(), "lib", "client.js"), "utf8");
+  let definition = null;
+  const context = vm.createContext({
+    window: { __ModuleLoader__: { load: (value) => { definition = value; } } },
+    console,
+  });
+  vm.runInContext(source, context, { filename: "client.js" });
+  assert.ok(definition, "client bundle 应调用 __ModuleLoader__.load");
+  const reactStub = { useState: () => [null, () => {}], useEffect: () => {}, useRef: () => ({ current: true }), createElement: () => null };
+  return definition.factory((name) => (name === "react" ? reactStub : {}));
+}
+
+await check("预设选择：切到自定义档位时不能沿用旧档位的值（否则选了预设但不生效）", () => {
+  const client = loadClientBundle();
+  const first = () => "custom:first";
+  assert.equal(client.composeTier("custom", "iot-balanced", first), "custom:first", "旧档位值不能被当成预设名");
+  assert.equal(client.composeTier("custom", "custom:mine", first), "custom:mine", "已是 custom 形态则沿用");
+  assert.equal(client.composeTier("custom", "custom", first), "custom", "贴入文本也沿用");
+  assert.equal(client.composeTier("iot-full", "custom:mine", first), "iot-full", "非 custom 档位原样返回");
+});
+
+await check("预设冲突：defaultPreset 只在 custom 档位生效，别的档位静默忽略", () => {
+  const items = resolveConfig({ strategy: "iot-balanced", defaultPreset: "builtin:standard" }, { sessionId: "s" });
+  assert.equal(items.strategy, "iot-balanced");
+  assert.equal(items.limits.preset, undefined, "非 custom 档位不该装配预设");
+
+  const custom = resolveConfig({ strategy: "custom", defaultPreset: "builtin:standard" }, { sessionId: "s" });
+  assert.equal(custom.limits.preset.kind, "builtin");
+
+  // 会话覆盖压过全局默认预设。
+  const session = resolveConfig(
+    { strategy: "custom", defaultPreset: "builtin:standard", sessions: { s: { strategy: "custom", preset: "builtin:deep" } } },
+    { sessionId: "s" },
+  );
+  assert.equal(session.limits.preset.name, "deep");
+});
+
+await check("预设冲突：目录文件与内置预设同名时互不干扰", () => {
+  const file = resolveConfig({ strategy: "custom", sessions: { s: "custom:standard" } }, { sessionId: "s" });
+  assert.equal(file.limits.preset.name, "standard");
+  assert.equal(file.limits.preset.kind, undefined, "custom:standard 是文件，不是内置");
+  const builtin = resolveConfig({ strategy: "custom", sessions: { s: "builtin:standard" } }, { sessionId: "s" });
+  assert.equal(builtin.limits.preset.kind, "builtin");
+});
+
 await check("内置预设：两个模板都在、只读、且要求必须更短", () => {
   const ids = BUILTIN_PRESETS.map((preset) => preset.id);
   assert.deepEqual(ids, ["standard", "deep"]);
@@ -1646,6 +1694,70 @@ await check("卸载：压缩调用真的发往配置的路由，并记账 offloa
   assert.equal(routeEvent.source, "config");
   assert.equal(result.event.provider, "local-p", "记账要写实际用过的路由");
   assert.equal(result.event.routeSource, "config");
+});
+
+await check("改写超时：模型一直吐字不结束，到点放弃并保留原文（不挂住会话）", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        // 模拟"一直在吐字、永不 finish"，但会响应 abort。
+        let stop = false;
+        options.signal?.addEventListener?.("abort", () => { stop = true; });
+        return (async function* () {
+          for (let i = 0; i < 1000 && !stop; i += 1) {
+            yield { type: "text-delta", index: 0, text: "还在想。" };
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          if (stop) throw Object.assign(new Error("aborted by timeout"), { code: "ABORT_ERR" });
+          yield { type: "finish", reason: { kind: "stop" } };
+        })();
+      },
+    },
+  };
+  const started = Date.now();
+  const result = await compressWith(ctx, { cfg: { rewriteTimeoutMs: 1000 }, events });
+  const elapsed = Date.now() - started;
+  assert.equal(result, null, "超时就是保留原文");
+  assert.ok(elapsed < 4000, `不该挂住：实际 ${elapsed}ms`);
+  const failed = events.find((entry) => entry.event === "thinking-failed");
+  assert.equal(failed.code, "REWRITE_TIMEOUT");
+  assert.match(failed.message, /超时/);
+});
+
+await check("调用预算：一块最多打 N 次模型，退化输出不再无限重试", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        // 永远返回空输出：custom 的 judge 判 empty，会走重试路径。
+        return chunks([{ type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  // 用 custom 档位（没有确定性兜底）且输出为空：empty 会重试一次，
+  // 第二次仍空就该停，不能再打第三次。
+  const text = DRAFT.repeat(2);
+  await compressWith(ctx, {
+    cfg: { strategy: "custom", rewriteBudget: 1, limits: { ...limitsOf("custom"), preset: { inline: "把草稿压短", name: "inline" }, acceptRule: "different" } },
+    events,
+    text,
+  });
+  assert.equal(calls.length, 1, "预算就是硬上限：重试那一发不该出去");
+  const failed = events.find((entry) => entry.event === "thinking-failed");
+  assert.equal(failed.code, "REWRITE_BUDGET");
+});
+
+await check("调用预算：默认值在合理区间，非法值被夹紧", () => {
+  assert.ok(REWRITE_BUDGET.defaultCalls >= 2 && REWRITE_BUDGET.defaultCalls <= 8);
+  assert.ok(REWRITE_BUDGET.minCalls >= 1 && REWRITE_BUDGET.maxCalls >= REWRITE_BUDGET.defaultCalls);
+});
+
+await check("改写超时：下限/上限夹紧，非法值回落默认", () => {
+  assert.equal(REWRITE_TIMEOUT.defaultMs, 120000);
+  assert.ok(REWRITE_TIMEOUT.minMs >= 1000 && REWRITE_TIMEOUT.maxMs >= REWRITE_TIMEOUT.defaultMs);
 });
 
 await check("卸载失败 + fallback=keep：保留原文，不回退重试", async () => {

@@ -131,7 +131,12 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 内置预设的替换规则固定为 `shorter` —— 一条不比原文短的输出不该替换掉整块 thinking。
 
 点「用这个」会同时把默认档位切到「自定义预设」并写入 `defaultPreset`；
-全局默认预设只在 custom 档位、且没有会话/preset 映射覆盖时生效。
+全局默认预设只在 custom 档位、且没有会话/preset 映射覆盖时生效 —— 档位不是
+自定义预设时，`defaultPreset` 会被静默忽略（这是配置层的既有语义，不是 bug）。
+
+⚠️ 已知坑（已修）：旧版设置卡从别的档位切到「自定义预设」时会沿用旧档位的值
+（`targetOf("iot-balanced")` 返回 `"iot-balanced"`），结果 `strategy` 没切过去，
+看起来像"选了预设但不生效"。现在只在 target 确实是 custom 形态时才沿用。
 
 ### 会话级 prompt
 
@@ -162,6 +167,9 @@ sessions: {
 - **失败策略 `rewrite.fallback`**：`keep`（默认，保留原文）或 `session`
   （卸载路由失败时回退到会话路由再试一次）。回退只发生一次，且两条路由必须不同；
   用户按 Esc 中断不触发回退 —— 中断是用户的决定，不是路由的错。
+- **调用上限（`rewriteTimeoutMs` / `rewriteBudget`）**：单块改写调用有硬超时（默认 120s）
+  与总调用预算（默认 4 次）。模型"一直吐字但永不结束"时到点放弃并保留原文；
+  effort 降级 + 重试 + 回退叠起来也不会把一块打成十几次调用。
 - **保存时的路由体检**：卡片保存后会拿 `listProviders` / `resolveModelInfo` 核一遍，
   不在注册表里的 provider、解析不了的 model 会以 `warnings` 返回。**只报警、不拒绝**：
   目录可能离线、provider 可能稍后才注册，把一次目录抖动变成"保存失败"更糟。
