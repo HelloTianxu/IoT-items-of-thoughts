@@ -39,7 +39,7 @@ import { defaultNodeModulesRoots, rootFromEntryPath, versionedRoots } from "./li
 import { guardRequest, redactEvents, registerConfigApi } from "./lib/config-api.mjs";
 import { mark } from "./lib/ledger.mjs";
 import { ConfigStore } from "./lib/config-store.mjs";
-import { migrateLegacyConfig, resolveConfig, resolveRoute, strategyCatalog } from "./lib/route.mjs";
+import { migrateLegacyConfig, migrateRewriteConfig, resolveConfig, resolveRewriteRoute, resolveRoute, strategyCatalog } from "./lib/route.mjs";
 import {
   DEFAULT_STRATEGY,
   LEGACY_PROFILE_TO_STRATEGY,
@@ -525,24 +525,27 @@ await check("seam 锚点：版本化安装按 mtime 降序、忽略非 dsh- 目�
 await check("seam 锚点：argv[1] 推导排在 profiles/node_modules 之前", () => {
   // 多版本共存：profiles/node_modules 里可能 hoist 着另一个 dsh 版本的 seam。
   // 先命中它 = 插件与宿主拿到两份不同实例 —— 必须让"正在跑的入口"先赢。
+  // 比较前把分隔符归一：这组用例写的是 Windows 路径，但仓库也要能在 POSIX 上跑。
+  const norm = (value) => String(value).replace(/\\/g, "/");
   const roots = defaultNodeModulesRoots({
     entry: "D:\\dsh-home\\dsh-0.2.1-rc.2\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js",
     home: "D:\\dsh-home",
     fs: { readdirSync: () => [], statSync: () => ({ mtimeMs: 0 }) },
   });
-  assert.equal(roots[0], "D:\\dsh-home\\dsh-0.2.1-rc.2\\node_modules");
-  const profilesAt = roots.indexOf("D:\\dsh-home\\profiles\\node_modules");
+  assert.equal(norm(roots[0]), "D:/dsh-home/dsh-0.2.1-rc.2/node_modules");
+  const profilesAt = roots.findIndex((root) => norm(root) === "D:/dsh-home/profiles/node_modules");
   assert.ok(profilesAt > 0, "profiles 根仍在候选里，只是排在后面");
-  assert.ok(!roots.slice(0, profilesAt).some((r) => r.endsWith("profiles\\node_modules")));
+  assert.ok(!roots.slice(0, profilesAt).some((root) => norm(root) === "D:/dsh-home/profiles/node_modules"));
 });
 
 await check("seam 锚点：入口落空时才用 profiles 根", () => {
+  const norm = (value) => String(value).replace(/\\/g, "/");
   const roots = defaultNodeModulesRoots({
     entry: "D:\\tmp\\not-under-node-modules\\selftest.mjs",
     home: "D:\\dsh-home",
     fs: { readdirSync: () => [], statSync: () => ({ mtimeMs: 0 }) },
   });
-  assert.equal(roots[0], "D:\\dsh-home\\profiles\\node_modules");
+  assert.equal(norm(roots[0]), "D:/dsh-home/profiles/node_modules");
 });
 
 await check("config API 门禁：缺自定义头一律 403", () => {
@@ -1474,6 +1477,162 @@ await check("迁移必须删掉旧平铺字段，否则切档位时它们会复�
   assert.equal(migrateLegacyConfig(handWritten), handWritten);
 });
 
+// ── 改写器路由（算力卸载） ────────────────────────────────────────────────
+await check("改写器路由：档位覆盖 > rewrite 块 > 跟随会话", () => {
+  const session = { provider: "session-p", model: "session-m" };
+  const fromStrategy = resolveRewriteRoute(
+    { rewrite: { provider: "local-p", model: "small" }, strategies: { "iot-compact": { provider: "cheap-p", model: "tiny" } } },
+    "iot-compact",
+    session,
+  );
+  assert.deepEqual([fromStrategy.provider, fromStrategy.model, fromStrategy.source], ["cheap-p", "tiny", "strategy"]);
+
+  const fromConfig = resolveRewriteRoute({ rewrite: { provider: "local-p", model: "small" } }, "iot-full", session);
+  assert.deepEqual([fromConfig.provider, fromConfig.model, fromConfig.source], ["local-p", "small", "config"]);
+
+  const follow = resolveRewriteRoute({ rewrite: { provider: null, model: null } }, "iot-full", session);
+  assert.deepEqual([follow.provider, follow.model, follow.source], ["session-p", "session-m", "session"]);
+
+  const none = resolveRewriteRoute({}, "iot-full", null);
+  assert.equal(none.source, "none");
+  assert.equal(none.provider, null);
+});
+
+await check("改写器路由：只填 provider 不算配了，继续往下掉一层", () => {
+  const route = resolveRewriteRoute(
+    { rewrite: { provider: "local-p", model: "" }, strategies: { "iot-full": { provider: "half-p" } } },
+    "iot-full",
+    { provider: "session-p", model: "session-m" },
+  );
+  assert.equal(route.source, "session", "半条路由不该被当成卸载目标");
+  assert.equal(route.provider, "session-p");
+});
+
+await check("改写器路由迁移：旧顶层字段搬进 rewrite，旧键删掉", () => {
+  const migrated = migrateRewriteConfig({ enabled: true, provider: "old-p", model: "old-m", reasoningEffort: "high" });
+  assert.deepEqual(migrated.rewrite, { provider: "old-p", model: "old-m", effort: "high" });
+  for (const key of ["provider", "model", "reasoningEffort"]) {
+    assert.equal(migrated[key], undefined, `迁移后不该还留着 ${key}`);
+  }
+  const fresh = { rewrite: { provider: "p", model: "m", effort: "auto", fallback: "session" } };
+  assert.equal(migrateRewriteConfig(fresh), fresh, "已经是新形状就不动");
+});
+
+await check("配置存储：rewrite 块只收已知键，非法 fallback 落回 keep，且是深合并", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-rewrite-"));
+  const store = new ConfigStore(join(dir, "config.json"));
+  store.save({ rewrite: { provider: " local-p ", model: "small", effort: "high", fallback: "nonsense" } });
+  const first = store.load();
+  assert.equal(first.rewrite.provider, "local-p", "provider 要 trim");
+  assert.equal(first.rewrite.model, "small");
+  assert.equal(first.rewrite.effort, "high");
+  assert.equal(first.rewrite.fallback, "keep", "非法 fallback 不该落盘");
+
+  store.save({ rewrite: { model: "other" } });
+  const second = store.load();
+  assert.equal(second.rewrite.provider, "local-p", "只改 model 时 provider 必须保留");
+  assert.equal(second.rewrite.model, "other");
+});
+
+await check("卸载：压缩调用真的发往配置的路由，并记账 offloaded", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([{ type: "text-delta", index: 0, text: GOOD }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { rewrite: { provider: "local-p", model: "small" } }, events });
+  assert.equal(result?.text, GOOD);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].provider, "local-p");
+  assert.equal(calls[0].model, "small");
+  const routeEvent = events.find((entry) => entry.event === "rewrite-route");
+  assert.equal(routeEvent.offloaded, true);
+  assert.equal(routeEvent.source, "config");
+  assert.equal(result.event.provider, "local-p", "记账要写实际用过的路由");
+  assert.equal(result.event.routeSource, "config");
+});
+
+await check("卸载失败 + fallback=keep：保留原文，不回退重试", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "boom", code: "PROVIDER_ERROR" } } }]);
+      },
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { rewrite: { provider: "local-p", model: "small", fallback: "keep" } }, events });
+  assert.equal(result, null, "失败就是保留原文");
+  assert.equal(calls.length, 1, "keep 不该回退重试");
+  assert.ok(events.some((entry) => entry.event === "thinking-failed"));
+  assert.ok(!events.some((entry) => entry.event === "rewrite-route-fallback"));
+});
+
+await check("卸载失败 + fallback=session：回退到会话路由再试一次", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        if (options.provider === "local-p") {
+          return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "local route down", code: "ECONNREFUSED" } } }]);
+        }
+        return chunks([{ type: "text-delta", index: 0, text: GOOD }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const result = await compressWith(ctx, { cfg: { rewrite: { provider: "local-p", model: "small", fallback: "session" } }, events });
+  assert.equal(result?.text, GOOD);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].provider, "local-p");
+  assert.equal(calls[1].provider, "p", "回退到会话路由");
+  const fallback = events.find((entry) => entry.event === "rewrite-route-fallback");
+  assert.equal(fallback.from.provider, "local-p");
+  assert.equal(fallback.to.provider, "p");
+  assert.equal(result.event.provider, "p", "记账要写实际用过的路由");
+  assert.equal(result.event.offloaded, false, "回退之后就不算卸载了");
+});
+
+await check("卸载到与会话相同的路由时不做无意义的回退", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "boom", code: "PROVIDER_ERROR" } } }]);
+      },
+    },
+  };
+  await compressWith(ctx, { cfg: { rewrite: { provider: "p", model: "m", fallback: "session" } }, events });
+  assert.equal(calls.length, 1, "同一条路由不该再打一次");
+  assert.ok(!events.some((entry) => entry.event === "rewrite-route-fallback"));
+});
+
+await check("卸载失败 + 用户按 Esc 中断：不重试", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ ...options });
+        return chunks([{ type: "finish", reason: { kind: "aborted", failure: { message: "aborted", code: "ABORTED" } } }]);
+      },
+    },
+  };
+  await compressWith(ctx, { cfg: { rewrite: { provider: "local-p", model: "small", fallback: "session" } }, events });
+  assert.equal(calls.length, 1, "中断是用户的决定，不是路由的错");
+  assert.ok(events.some((entry) => entry.event === "thinking-skipped" && entry.reason === "aborted"));
+});
+
 
 
 
@@ -1970,6 +2129,55 @@ await check("config API：映射表是整表替换 —— 删除与清空都能�
     body: JSON.stringify({ agentPresets: { jingjing: "custom:my-style" } }),
   });
   assert.deepEqual(custom.payload.config.agentPresets, { jingjing: "custom:my-style" });
+});
+
+await check("config API：rewrite 路由能落盘、能增量改、非法值被挡，且只报警不拒绝", async () => {
+  const ws = fakeWebServer();
+  // 用真 store：深合并与归一化就在它里面，假 store 会把这些行为测丢。
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-rewrite-api-")), "config.json"));
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const put = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ rewrite: { provider: "local-llama", model: "qwen3-4b", fallback: "session" } }),
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual(put.payload.config.rewrite, { provider: "local-llama", model: "qwen3-4b", effort: "auto", fallback: "session" });
+  assert.ok(
+    Array.isArray(put.payload.warnings) && put.payload.warnings.some((line) => line.includes("local-llama")),
+    "不在注册表里的 provider 要报警（但不拒绝保存）",
+  );
+
+  // 增量改 model：不能把 provider 抹掉。
+  const patch = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ rewrite: { model: "other" } }),
+  });
+  assert.equal(patch.payload.config.rewrite.provider, "local-llama", "增量改 model 不能把 provider 抹掉");
+  assert.equal(patch.payload.config.rewrite.model, "other");
+
+  // 清掉路由不等于清掉失败策略。
+  const cleared = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ rewrite: { provider: null, model: null } }),
+  });
+  assert.equal(cleared.payload.config.rewrite.provider, null);
+  assert.equal(cleared.payload.config.rewrite.fallback, "session", "清路由不该清失败策略");
+
+  // 已知 provider/model 不该报警。
+  const known = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ rewrite: { provider: "deepseek-official", model: "deepseek-flash" } }),
+  });
+  assert.equal(known.payload.warnings, undefined, "解析得通就不该有 warnings");
+
+  // 旧卡片发的顶层 provider/model 折进 rewrite，行为不变。
+  const legacy = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ provider: "tyds", model: "gapi-gemini-3.8-flash" }),
+  });
+  assert.equal(legacy.payload.config.rewrite.provider, "tyds");
+  assert.equal(legacy.payload.config.rewrite.model, "gapi-gemini-3.8-flash");
 });
 
 await check("映射项：custom / custom:名字 都能解析，老对象形态仍读得懂", () => {

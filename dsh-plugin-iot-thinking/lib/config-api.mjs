@@ -10,7 +10,7 @@
 import { normalizeEffort } from "./effort.mjs";
 import { tailEvents } from "./ledger.mjs";
 import { strategyById, strategyIds } from "./strategies.mjs";
-import { normalizeRouteEntry, resolveConfig, strategyCatalog } from "./route.mjs";
+import { normalizeRouteEntry, resolveConfig, resolveRewriteRoute, strategyCatalog } from "./route.mjs";
 import { listPresets, readPreset, writePreset } from "./custom.mjs";
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -224,6 +224,24 @@ function strategyTable(patch) {
   return out;
 }
 
+/**
+ * 改写器路由块的写入：provider/model 只收非空字符串或 null（null = 跟随会话），
+ * effort 走 normalizeEffort（未知值不落盘），fallback 只认 keep/session。
+ * 返回的是**增量**对象：store 的 merge 会把它叠在现有 rewrite 上。
+ */
+function sanitizeRewrite(payload) {
+  const out = {};
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return out;
+  for (const key of ["provider", "model"]) {
+    if (payload[key] === null) out[key] = null;
+    else if (typeof payload[key] === "string") out[key] = payload[key].trim() || null;
+  }
+  const effort = normalizeEffort(payload.effort);
+  if (effort !== null) out.effort = effort;
+  if (payload.fallback === "keep" || payload.fallback === "session") out.fallback = payload.fallback;
+  return out;
+}
+
 function sanitize(payload) {
   const next = {};
   if (typeof payload.enabled === "boolean") next.enabled = payload.enabled;
@@ -244,13 +262,19 @@ function sanitize(payload) {
   if (typeof payload.presetDir === "string") next.presetDir = payload.presetDir.trim();
   if (typeof payload.customText === "string") next.customText = payload.customText;
   if (payload.presetAccept === "shorter" || payload.presetAccept === "different") next.presetAccept = payload.presetAccept;
-  // 未知档位不落盘；null 表示 auto。
-
-  const effort = normalizeEffort(payload.reasoningEffort);
-  if (effort !== null) next.reasoningEffort = effort;
-  for (const key of ["provider", "model"]) {
-    if (payload[key] === null) next[key] = null;
-    else if (typeof payload[key] === "string") next[key] = payload[key].trim() || null;
+  // 改写器路由（算力卸载）：新形状是 `rewrite` 块；旧卡片发的顶层
+  // provider/model/reasoningEffort 折进同一个块，行为不变。
+  if (payload.rewrite !== undefined) {
+    next.rewrite = sanitizeRewrite(payload.rewrite);
+  } else if (payload.provider !== undefined || payload.model !== undefined || payload.reasoningEffort !== undefined) {
+    const legacy = {};
+    for (const key of ["provider", "model"]) {
+      if (payload[key] === null) legacy[key] = null;
+      else if (typeof payload[key] === "string") legacy[key] = payload[key].trim() || null;
+    }
+    const effort = normalizeEffort(payload.reasoningEffort);
+    if (effort !== null) legacy.effort = effort;
+    next.rewrite = legacy;
   }
   return next;
 }
@@ -273,6 +297,18 @@ function sanitizeStrategies(payload, current) {
     if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) continue;
     const next = { ...(out[id] ?? {}) };
     for (const [key, value] of Object.entries(overrides)) {
+      // 档位级路由覆盖：provider/model 是字符串（null = 删掉这一层，跟随上一级）。
+      if (key === "provider" || key === "model") {
+        if (value === null) {
+          delete next[key];
+          continue;
+        }
+        if (typeof value !== "string") continue;
+        const trimmed = value.trim();
+        if (trimmed) next[key] = trimmed;
+        else delete next[key];
+        continue;
+      }
       if (!Number.isFinite(value)) continue;
       next[key] = Math.max(key === "temperature" || key === "minRatio" ? 0 : 0, value);
     }
@@ -422,6 +458,55 @@ function limitsMerge(id, overrides) {
   return { ...strategy.defaults, ...(overrides ?? {}) };
 }
 
+/**
+ * 保存后的路由体检：只报警、不拒绝。
+ *
+ * 目录可能离线、provider 可能稍后才注册 —— 把一次目录抖动变成"保存失败"
+ * 会让用户以为配置写坏了。真正的失败在账本里（`thinking-failed` /
+ * `rewrite-route-fallback`），这里只负责把"选了个不存在的路由"提前说出来。
+ */
+async function routeWarnings(ctx, cfg) {
+  const out = [];
+  const llm = (typeof ctx.get === "function" ? ctx.get("llm") : undefined) ?? ctx?.llm;
+  if (!llm) return out;
+
+  let providers = [];
+  try {
+    providers = (llm.listProviders?.() ?? []).map((entry) => entry?.id).filter(Boolean);
+  } catch {
+    /* 目录不可用就别据此报警 */
+  }
+
+  const targets = [];
+  const global = cfg?.rewrite;
+  if (global && typeof global === "object" && global.provider) {
+    targets.push({ where: "改写器路由", provider: global.provider, model: global.model });
+  }
+  for (const [id, overrides] of Object.entries(cfg?.strategies ?? {})) {
+    if (overrides && typeof overrides === "object" && overrides.provider) {
+      targets.push({ where: `档位 ${id}`, provider: overrides.provider, model: overrides.model });
+    }
+  }
+
+  for (const target of targets) {
+    if (!target.model) {
+      out.push(`${target.where}：只填了 provider、没有 model —— 这条路由不生效，会继续往下掉一层`);
+      continue;
+    }
+    if (providers.length > 0 && !providers.includes(target.provider)) {
+      out.push(`${target.where}：provider「${target.provider}」不在宿主注册表里（可用：${providers.slice(0, 6).join(" / ")}）`);
+      continue;
+    }
+    if (typeof llm.resolveModelInfo !== "function") continue;
+    try {
+      await withTimeout(llm.resolveModelInfo(target.provider, target.model), CATALOG_TIMEOUT_MS, "resolveModelInfo");
+    } catch (error) {
+      out.push(`${target.where}：${target.provider}/${target.model} 解析失败 —— ${String(error?.message ?? error)}`);
+    }
+  }
+  return out;
+}
+
 function doRegister(ctx, ws, store, deps = {}) {
   const config = async (req, res) => {
     const gate = guardRequest(req);
@@ -469,8 +554,10 @@ function doRegister(ctx, ws, store, deps = {}) {
         if (payload.sessions !== undefined) patch.sessions = strategyTable(payload.sessions);
         if (payload.strategies !== undefined) patch.strategies = sanitizeStrategies(payload.strategies, current.strategies);
         const saved = store.save(patch);
+        // 路由体检只报警：目录离线或 provider 稍后才注册，不该让保存失败。
+        const warnings = await routeWarnings(ctx, saved);
         const { path: _omit, ...safe } = saved;
-        sendJson(res, 200, { ok: true, config: safe });
+        sendJson(res, 200, { ok: true, config: safe, ...(warnings.length > 0 ? { warnings } : {}) });
         return;
       }
       sendJson(res, 405, { error: "method not allowed" });
@@ -502,7 +589,9 @@ function doRegister(ctx, ws, store, deps = {}) {
       const preset = url.searchParams.get("agentPreset");
       // 卡片要能回答"为什么这个会话现在用的是这一档"：把解析结果与来源一起回。
       const resolved = sessionId || preset ? resolveConfig(cfg, { sessionId, agentPreset: preset }).route : null;
-      sendJson(res, 200, { config: safe, events: redactEvents(tailEvents(25)), ...catalogPayload(store), resolved });
+      // 卡片要能对比"会话现在走哪条路由"与"压缩器卸载到哪条路由"。
+      const sessionRoute = typeof deps.getRoute === "function" ? deps.getRoute() : null;
+      sendJson(res, 200, { config: safe, events: redactEvents(tailEvents(25)), ...catalogPayload(store), resolved, sessionRoute });
     } catch (error) {
       sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -936,11 +1025,15 @@ function doRegister(ctx, ws, store, deps = {}) {
     // test has no request to follow. index.mjs records the last agent-loop route
     // for exactly this case.
     const lastRoute = typeof deps.getRoute === "function" ? deps.getRoute() : null;
-    const provider = cfg.provider || lastRoute?.provider || null;
-    const model = cfg.model || lastRoute?.model || null;
+    // 与真实链路同一套解析：档位覆盖 > rewrite 块 > 跟随最近一次 agent-loop 路由。
+    // 自测必须走这条，否则"测的是会话路由、跑的是卸载路由"就是假绿。
+    const route = resolveRewriteRoute(cfg, cfg.strategy, lastRoute);
+    const provider = route.provider;
+    const model = route.model;
     if (!provider || !model) {
       sendJson(res, 409, {
         ok: false,
+        routeSource: route.source,
         error: "还没有可用的改写路由：在卡片里选一个 provider/model，或先在本会话发一条消息（插件会记住当前请求路由）。",
       });
       return;
@@ -970,6 +1063,8 @@ function doRegister(ctx, ws, store, deps = {}) {
         strategy: cfg.strategy,
         provider,
         model,
+        routeSource: route.source,
+        offloaded: route.source !== "session",
         charsIn: input.length,
         charsOut: 0,
         text: null,
@@ -1021,6 +1116,8 @@ function doRegister(ctx, ws, store, deps = {}) {
       strategy: cfg.strategy,
       provider,
       model,
+      routeSource: route.source,
+      offloaded: route.source !== "session",
       charsIn: input.length,
       charsOut: text.length,
       text: text || null,

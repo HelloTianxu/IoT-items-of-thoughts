@@ -111,10 +111,32 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 - **逐档限制** — `minChars` / `maxChars` / `maxTokens` / `maxNodes` / `maxNeutral`；
 - **按 agent preset 映射** — "当 preset 是 X → 就用 Y"。渲染成一张**条件 → 结论**表，
   因为这里只有一层选择：preset 是条件，档位是结论；
-- **推理档位（`reasoningEffort`）** — `auto` 默认：先发 `off`（改写器不花预算在自己的
+- **推理档位（`rewrite.effort`）** — `auto` 默认：先发 `off`（改写器不花预算在自己的
   thinking 上），宿主拒绝该档位就改用该路由公开的 `minimal`/`low`，没有就不发这个字段。
   决策按 `(provider, model, 档位)` 记住，同一路由不会再白试一次；
-- 可选 **provider / model** — 留空跟随当前请求的路由。
+- **压缩器路由（算力卸载）** — 见下一节：可以指定压缩调用走哪条路由，也可以按档位覆盖。
+
+### 压缩器路由（算力卸载）
+
+压缩调用的路由是三层解析：`strategies[<档位>]` > `rewrite` > 跟随当前请求。
+"跟随当前请求"意味着压缩与主对话同模型；显式指定后，压缩算力就落在那个模型上
+（例如本地小模型、另一家供应商）。解析在钩子内部做 —— 档位是按会话/preset 选出来的，
+路由必须跟着档位走。
+
+- **必须 provider + model 同时给。** 只填一半不算"配了"，会继续往下掉一层：
+  跨 provider 猜 model 名比回退更危险。
+- **失败策略 `rewrite.fallback`**：`keep`（默认，保留原文）或 `session`
+  （卸载路由失败时回退到会话路由再试一次）。回退只发生一次，且两条路由必须不同；
+  用户按 Esc 中断不触发回退 —— 中断是用户的决定，不是路由的错。
+- **保存时的路由体检**：卡片保存后会拿 `listProviders` / `resolveModelInfo` 核一遍，
+  不在注册表里的 provider、解析不了的 model 会以 `warnings` 返回。**只报警、不拒绝**：
+  目录可能离线、provider 可能稍后才注册，把一次目录抖动变成"保存失败"更糟。
+- **账本**：每次改写尝试先记 `rewrite-route`（provider / model / source / offloaded）；
+  回退记 `rewrite-route-fallback`（from / to / 原因）；最终 `block-replaced` 里的
+  `provider`/`model` 是**实际用过**的那条路由，回退之后 `offloaded` 为 false。
+
+自测（`POST /iot-thinking/api/test`）走同一套解析，并在响应里回 `routeSource`/`offloaded`，
+避免"测的是会话路由、跑的是卸载路由"的假绿。
 
 ### 配置
 
@@ -127,18 +149,22 @@ $DSH_HOME/plugin-data/iot-thinking/config.json
   "enabled": true,
   "strategy": "iot-full",                    // 全局默认
   "strategies": {                            // 逐档位覆盖（键是档位 id）
-    "iot-full": { "minChars": 700 },
-    "custom":   { "minChars": 120 }
+    "iot-full":    { "minChars": 700 },
+    "iot-compact": { "minChars": 700, "provider": "local-llama", "model": "qwen3-4b" },
+    "custom":      { "minChars": 120 }
   },
   "agentPresets": { "standard": "iot-balanced", "jingjing": "custom:character-inner-voice" },
   "sessions": { "<sessionId>": "iot-compact" },
+  "rewrite": {                               // 压缩器路由（算力卸载）
+    "provider": null,                        // null = 跟随当前请求
+    "model": null,
+    "effort": "auto",
+    "fallback": "keep"                       // 或 "session"
+  },
   "presetDir": "",                           // 必填：留空则文件类预设不可用
   "customText": "",                          // 选 `custom` 时用这段
   "presetAccept": "different",               // 或 "shorter"
   "sessionSwitch": false,                    // 对话顶部是否显示「按会话覆盖」下拉，默认 false
-  "provider": null,
-  "model": null,
-  "reasoningEffort": "auto",
   "archive": true
 }
 ```
@@ -147,7 +173,8 @@ $DSH_HOME/plugin-data/iot-thinking/config.json
 `minChars`/`maxChars`/`maxTokens`/`maxNodes`/`maxNeutral` 会被搬进 `strategies[<档位>]`，
 然后**删掉旧键**。留着不行：`limitsOf` 在没有逐档覆盖时会去读它们，于是"切到一个
 没配过的档位"会把旧档位的数字一起带过去（实测：从 compact 切到 full，`maxNodes`
-变成旧配置里的 10）。
+变成旧配置里的 10）。旧的顶层 `provider`/`model`/`reasoningEffort` 同样会被搬进
+`rewrite` 并删键 —— 留着的话，以后把 `rewrite` 清空，旧值会通过兜底重新活过来。
 
 ## 怎么看"到底会发什么"
 
@@ -192,11 +219,13 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 自己按了 Esc，不是插件出错）、`thinking-degenerate`（基础三档的输出被拒 / 兜底 / 输入已循环）、
 `thinking-rejected`（自定义预设被拒）、`thinking-effort-fallback`、
 `thinking-effort-unsupported`、`thinking-effort-probe-failed`、`thinking-self-test`、
-`strategy-switched`（会话内切换）。
+`strategy-switched`（会话内切换）、`rewrite-route`（本次改写发往哪条路由、是否卸载）、
+`rewrite-route-fallback`（卸载路由失败后回退到会话路由）。
 
 每条改写事件都带 `strategy`；`block-replaced` 还带形态学指标（基础三档 `nodes`，
 自定义预设 `lines` / `fragmentRate`）。统计收益请用 `block-replaced`，不要用
-`thinking-rewritten` 求和（后者含被拒的块）。
+`thinking-rewritten` 求和（后者含被拒的块）。要确认"压缩真的卸载到了别的模型"，
+看 `rewrite-route` 的 `source`/`offloaded`，以及 `block-replaced` 里的 `provider`/`model`。
 
 **失败本来静默**：按设计失败就保留原文，界面上只表现为"没效果"。所以 `thinking-failed`
 带宿主的 `code`（如 `UNSUPPORTED_REASONING_EFFORT`），设置卡在最近一次判定是失败时
@@ -214,14 +243,14 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 | `index.mjs` | host 半个：`llm/stream` 钩子（按会话解析档位）、配置桥、`/iot` 命令、最近路由 |
 | `lib/stream.mjs` | 纯 chunk 转换器（扣住 → 改写 → 一个 delta + 改写的 block-end）；替换判定交给档位 |
 | `lib/strategies.mjs` | 档位注册表：三档基础 + `custom` + `off`，五个部件（prepare / skipInput / buildPrompt / finalize / accepts） |
-| `lib/route.mjs` | 三层解析、旧配置迁移、档位目录 |
+| `lib/route.mjs` | 档位三层解析、改写器路由解析（算力卸载）、旧配置迁移、档位目录 |
 | `lib/custom.mjs` | 自定义预设：目录 / 列表 / 读（mtime 缓存）/ 另存为 / 提示词拼装 |
 | `lib/gates.mjs` | 自定义预设的四道最小闸 |
 | `lib/switch.mjs` | `/iot` 的纯逻辑（与 HTTP 桥共用同一张 `sessions` 表） |
 | `lib/compress.mjs` | 通用改写引擎：模型调用、effort 恢复、按档位判定与重试、确定性兜底 |
-| `lib/effort.mjs` | `reasoningEffort` 策略：id、按路由缓存、拒绝判定 |
+| `lib/effort.mjs` | 改写器推理档位策略：id、按路由缓存、拒绝判定 |
 | `lib/think.mjs` | 基础三档的指令、prompt 装配、草稿净化、退化判定、节点渲染 |
-| `lib/config-store.mjs` | 活配置（行默认值 + 用户文件）+ 一次性迁移 |
+| `lib/config-store.mjs` | 活配置（行默认值 + 用户文件）+ 一次性迁移（含 `rewrite` 块） |
 | `lib/config-api.mjs` | HTTP 路由：`config` / `status` / `models` / `test` / `session` / `presets` / `strategy` / `preset-dir` |
 | `lib/ledger.mjs` | 事件账本 + 原文归档 |
 | `lib/client.js` | 设置卡 + 对话顶部档位下拉 |

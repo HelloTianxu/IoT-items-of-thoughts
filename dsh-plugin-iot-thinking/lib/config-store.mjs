@@ -20,7 +20,8 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import { migrateLegacyConfig, normalizeRouteEntry } from "./route.mjs";
+import { migrateLegacyConfig, migrateRewriteConfig, normalizeRouteEntry } from "./route.mjs";
+import { normalizeEffort } from "./effort.mjs";
 import { DEFAULT_STRATEGY, strategyById } from "./strategies.mjs";
 
 export const DEFAULTS = Object.freeze({
@@ -33,12 +34,17 @@ export const DEFAULTS = Object.freeze({
   agentPresets: {},
   /** sessionId → 策略 id。会话内切换只写这一层。 */
   sessions: {},
-  provider: null,
-  model: null,
-  // "auto" = try `off`, then fall back to a cheap advertised level or to no
-  // field at all. A hardcoded "off" made every pi-ai route fail before the
-  // request left the host (issue #3).
-  reasoningEffort: "auto",
+  /**
+   * 改写器路由（算力卸载）：显式给出 provider/model 时，压缩调用走这条路，
+   * 与主会话路由无关；null 表示跟随当前请求。
+   * `effort` 是改写器自己那一次调用的推理档位；`fallback` 决定卸载路由失败时
+   * 是保留原文（keep）还是回退到会话路由再试一次（session）。
+   */
+  rewrite: { provider: null, model: null, effort: "auto", fallback: "keep" },
+  // 旧形状，只读兼容：load() 会把它们搬进 rewrite 并删键。
+  provider: undefined,
+  model: undefined,
+  reasoningEffort: undefined,
   archive: true,
   // 会话级档位下拉（对话头部）：默认关。多数人用不到 per-session 覆盖，
   // 那行控件反而让人以为"档位要被它管"；/iot 命令始终可用。
@@ -114,6 +120,24 @@ function strategiesMap(value) {
   return out;
 }
 
+/**
+ * 改写器路由块的归一化：只认已知键，provider/model 只收非空字符串，
+ * effort 走 normalizeEffort（未知值落回 auto），fallback 只认 keep/session。
+ * 坏值一律降级而不是整块丢弃 —— 一块坏字段不该让插件停摆。
+ */
+function rewriteConfig(value) {
+  const out = { provider: null, model: null, effort: "auto", fallback: "keep" };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return out;
+  for (const key of ["provider", "model"]) {
+    if (value[key] === null) out[key] = null;
+    else if (typeof value[key] === "string") out[key] = value[key].trim() || null;
+  }
+  const effort = normalizeEffort(value.effort);
+  out.effort = effort ?? "auto";
+  out.fallback = value.fallback === "session" ? "session" : "keep";
+  return out;
+}
+
 function merge(base, overlay) {
   const out = { ...base };
   if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return out;
@@ -123,6 +147,7 @@ function merge(base, overlay) {
   out.strategies = strategiesMap(out.strategies);
   out.agentPresets = strategyMap(out.agentPresets);
   out.sessions = strategyMap(out.sessions);
+  out.rewrite = rewriteConfig(out.rewrite);
   return out;
 }
 
@@ -148,9 +173,12 @@ export class ConfigStore {
     const raw = readJson(this.path);
     // 旧文件 → 新形状。迁移只在"文件里有旧 `profile`、却没有新 `strategy`"时发生，
     // 且立刻落盘：否则每次 load 都要重算，而 user 在设置卡里存的任何值都会覆盖它。
-    const migrated = raw === null ? null : migrateLegacyConfig(raw);
-    if (migrated !== null && migrated !== raw) {
-      this.migrated = { from: String(raw.profile ?? ""), to: String(migrated.strategy ?? "") };
+    const strategyMigrated = raw === null ? null : migrateLegacyConfig(raw);
+    // 旧形状的 provider/model/reasoningEffort 也搬进 rewrite 块：迁移是行为不变的，
+    // 原来"填了就卸载、留空就跟随会话"，迁移后完全一样。
+    const migrated = strategyMigrated === null ? null : migrateRewriteConfig(strategyMigrated);
+    if (strategyMigrated !== null && strategyMigrated !== raw) {
+      this.migrated = { from: String(raw.profile ?? ""), to: String(strategyMigrated.strategy ?? "") };
     }
 
     const cfg = merge(this.rowDefaults, migrated ?? raw);
@@ -164,7 +192,13 @@ export class ConfigStore {
 
   save(next) {
     const current = this._cache ?? readJson(this.path) ?? this.rowDefaults;
-    const merged = merge(this.rowDefaults, { ...current, ...(next || {}) });
+    const overlay = { ...current, ...(next || {}) };
+    // rewrite 是嵌套块：增量写入（只改 model / 只改 fallback）必须和当前值合并，
+    // 否则浅合并会把没提到的字段一起抹掉 —— 用户会看到"保存完 provider 没了"。
+    if (current?.rewrite && typeof current.rewrite === "object" && next?.rewrite && typeof next.rewrite === "object") {
+      overlay.rewrite = { ...current.rewrite, ...next.rewrite };
+    }
+    const merged = merge(this.rowDefaults, overlay);
     mkdirSync(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp-${process.pid}`;
     writeFileSync(tmp, `${JSON.stringify(merged, null, 2)}\n`, "utf8");

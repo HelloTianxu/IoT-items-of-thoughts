@@ -34,9 +34,7 @@ window.__ModuleLoader__.load({
       strategies: {},
       agentPresets: {},
       sessions: {},
-      provider: null,
-      model: null,
-      reasoningEffort: "auto",
+      rewrite: { provider: null, model: null, effort: "auto", fallback: "keep" },
       archive: true,
     };
 
@@ -195,6 +193,7 @@ window.__ModuleLoader__.load({
       const [providers, setProviders] = useState([]);
       const [models, setModels] = useState([]);
       const [reasoning, setReasoning] = useState(null);
+      const [sessionRoute, setSessionRoute] = useState(null);
       const [catalogNote, setCatalogNote] = useState(null);
       const [testBusy, setTestBusy] = useState(false);
       const [test, setTest] = useState(null);
@@ -239,6 +238,7 @@ window.__ModuleLoader__.load({
           if (!resp.ok) throw new Error((data && data.error) || "HTTP " + resp.status);
           setCfg(data.config ?? FALLBACK);
           setSaved(JSON.stringify(data.config ?? FALLBACK));
+          setSessionRoute(data.sessionRoute && typeof data.sessionRoute === "object" ? data.sessionRoute : null);
           if (Array.isArray(data.strategies)) setCatalog(data.strategies);
           if (data.choices && typeof data.choices === "object" && !Array.isArray(data.choices)) setChoices(data.choices);
           if (Array.isArray(data.presetFiles)) setPresetFiles(data.presetFiles);
@@ -371,9 +371,12 @@ window.__ModuleLoader__.load({
         if (cfg === null) return;
         // Typing a provider/model by hand fires this on every keystroke; debounce
         // so the catalog is queried once the value settles.
-        const timer = setTimeout(() => loadCatalog(cfg.provider ?? "", cfg.model ?? ""), 400);
+        const rewrite = cfg.rewrite && typeof cfg.rewrite === "object" ? cfg.rewrite : {};
+        const provider = typeof rewrite.provider === "string" ? rewrite.provider : (typeof cfg.provider === "string" ? cfg.provider : "");
+        const model = typeof rewrite.model === "string" ? rewrite.model : (typeof cfg.model === "string" ? cfg.model : "");
+        const timer = setTimeout(() => loadCatalog(provider, model), 400);
         return () => clearTimeout(timer);
-      }, [cfg && cfg.provider, cfg && cfg.model]);
+      }, [cfg && cfg.rewrite && cfg.rewrite.provider, cfg && cfg.rewrite && cfg.rewrite.model, cfg && cfg.provider, cfg && cfg.model]);
 
       const set = (patch) => setCfg((current) => ({ ...(current ?? FALLBACK), ...patch }));
 
@@ -518,16 +521,52 @@ window.__ModuleLoader__.load({
 
       if (cfg === null) return h("div", { style: { padding: 24, color: "#777" } }, "加载配置…");
 
+      // 改写器路由：新形状是 cfg.rewrite；旧 host 只有顶层 provider/model，
+      // 这里兼容读取，写回时一律写 rewrite 块。
+      const rewriteCfg = (() => {
+        const rewrite = cfg.rewrite && typeof cfg.rewrite === "object" && !Array.isArray(cfg.rewrite) ? cfg.rewrite : {};
+        const pick = (key, legacy) => {
+          if (typeof rewrite[key] === "string") return rewrite[key];
+          if (rewrite[key] === null) return null;
+          return typeof legacy === "string" ? legacy : null;
+        };
+        return {
+          provider: pick("provider", cfg.provider),
+          model: pick("model", cfg.model),
+          effort: typeof rewrite.effort === "string" ? rewrite.effort : (typeof cfg.reasoningEffort === "string" ? cfg.reasoningEffort : "auto"),
+          fallback: rewrite.fallback === "session" ? "session" : "keep",
+        };
+      })();
+      const setRewrite = (patch) => set({ rewrite: { ...rewriteCfg, ...patch } });
+      const routeLabel = (target) => (target && target.provider && target.model ? target.provider + "/" + target.model : "跟随会话");
+      const strategyRouteOf = (id) => {
+        const overrides = (cfg.strategies && cfg.strategies[id]) || {};
+        return {
+          provider: typeof overrides.provider === "string" ? overrides.provider : "",
+          model: typeof overrides.model === "string" ? overrides.model : "",
+        };
+      };
+      const setStrategyRoute = (id, patch) => {
+        const next = { ...(cfg.strategies ?? {}) };
+        const row = { ...(next[id] ?? {}) };
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === "" || value === null) delete row[key];
+          else row[key] = value;
+        }
+        next[id] = row;
+        set({ strategies: next });
+      };
+
       const advertised = reasoning && Array.isArray(reasoning.efforts) ? reasoning.efforts : null;
-      const currentEffort = cfg.reasoningEffort ?? "auto";
+      const currentEffort = rewriteCfg.effort;
       const effortChoices = ["auto", ...(advertised ? advertised.map((entry) => entry.id) : [...EFFORT_IDS])];
       if (!effortChoices.includes(currentEffort)) effortChoices.push(currentEffort);
 
       // A route typed by hand may not be in the catalog; keep it selectable.
       const providerChoices = providers.map((entry) => entry.id);
-      if (cfg.provider && !providerChoices.includes(cfg.provider)) providerChoices.push(cfg.provider);
+      if (rewriteCfg.provider && !providerChoices.includes(rewriteCfg.provider)) providerChoices.push(rewriteCfg.provider);
       const modelChoices = models.map((entry) => entry.id);
-      if (cfg.model && !modelChoices.includes(cfg.model)) modelChoices.push(cfg.model);
+      if (rewriteCfg.model && !modelChoices.includes(rewriteCfg.model)) modelChoices.push(rewriteCfg.model);
 
       // 两级值域：先选档位，选到"自定义预设"后才选具体用哪份文本。
       // 拿不到 host 的 choices（旧 host / 请求失败）时退回内置档位，功能不残。
@@ -981,30 +1020,36 @@ window.__ModuleLoader__.load({
             "预设里写 `{{draft}}` 就是完整提示词（引擎不再追加包装）；不写则按指令体处理，引擎把草稿包进 `<thinking>` 再发出去。")
         ),
 
-        // ── 路由与推理档位 ──────────────────────────────────────────────────
+        // ── 压缩器路由（算力卸载） ────────────────────────────────────────────
         h("div", { style: section },
-          h("div", { style: sectionTitle }, "改写器路由与推理档位"),
-          h("div", { style: { display: "grid", gridTemplateColumns: "minmax(0,1fr) 220px", gap: 10, alignItems: "center", marginTop: 8 } },
-            h("div", { style: hint }, advertised
-              ? "该路由公开的档位：" + advertised.map((entry) => (entry.name && entry.name !== entry.id ? entry.id + "（" + entry.name + "）" : entry.id)).join(" / ")
-              : "自动 = 先发 off；宿主拒绝时不发这个字段，由供应商取默认值（改写器会自己思考，慢一些但一定能跑）。"),
+          h("div", { style: sectionTitle }, "压缩器路由（算力卸载）"),
+          h("div", { style: hint },
+            "压缩调用走哪条路由。跟随会话 = 与主对话同模型；指定后，压缩算力落在你选的那个模型上（例如本地小模型或另一家供应商）。"),
+          h("div", { style: { ...hint, marginTop: 6 } },
+            sessionRoute && sessionRoute.provider && sessionRoute.model
+              ? "会话当前路由：" + sessionRoute.provider + "/" + sessionRoute.model
+              : "会话当前路由：未知（发一条消息后插件会记住最近一次请求路由）"),
+          h("div", { style: { display: "grid", gridTemplateColumns: "220px minmax(0,1fr)", gap: 8, marginTop: 10, alignItems: "center" } },
             h("select", {
-              value: currentEffort,
+              value: rewriteCfg.provider ? "explicit" : "follow",
               style: { ...input, width: "100%", boxSizing: "border-box", padding: "6px 8px" },
-              onChange: (e) => set({ reasoningEffort: e.target.value }),
+              onChange: (e) => setRewrite(e.target.value === "follow"
+                ? { provider: null, model: null }
+                : { provider: rewriteCfg.provider || providerChoices[0] || null, model: rewriteCfg.model || modelChoices[0] || null }),
             },
-              ...effortChoices.map((id) => h("option", { key: id, value: id }, EFFORT_LABELS[id] ?? id))
-            )
+              h("option", { value: "follow" }, "跟随会话路由"),
+              h("option", { value: "explicit" }, "指定路由（卸载）")
+            ),
+            h("div", { style: hint }, rewriteCfg.provider
+              ? "压缩请求发往：" + routeLabel(rewriteCfg)
+                + (sessionRoute && sessionRoute.provider === rewriteCfg.provider && sessionRoute.model === rewriteCfg.model ? "（与会话相同，等于没卸载）" : "")
+              : "压缩请求与主对话同路由")
           ),
-          h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 } },
-            h("input", { placeholder: "provider（留空跟随当前路由）", value: cfg.provider ?? "", style: { ...input, width: "100%", boxSizing: "border-box" }, onChange: (e) => set({ provider: e.target.value || null }) }),
-            h("input", { placeholder: "model（留空跟随当前路由）", value: cfg.model ?? "", style: { ...input, width: "100%", boxSizing: "border-box" }, onChange: (e) => set({ model: e.target.value || null }) })
-          ),
-          h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 } },
+          rewriteCfg.provider ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 } },
             h("select", {
-              value: cfg.provider ?? "",
+              value: rewriteCfg.provider ?? "",
               style: { ...input, width: "100%", boxSizing: "border-box", padding: "6px 8px" },
-              onChange: (e) => set({ provider: e.target.value || null, model: null }),
+              onChange: (e) => setRewrite({ provider: e.target.value || null, model: null }),
             },
               h("option", { value: "" }, "从模型目录选 provider…"),
               ...providerChoices.map((id) => {
@@ -1013,17 +1058,56 @@ window.__ModuleLoader__.load({
               })
             ),
             h("select", {
-              value: cfg.model ?? "",
+              value: rewriteCfg.model ?? "",
               style: { ...input, width: "100%", boxSizing: "border-box", padding: "6px 8px" },
-              disabled: !cfg.provider,
-              onChange: (e) => set({ model: e.target.value || null }),
+              disabled: !rewriteCfg.provider,
+              onChange: (e) => setRewrite({ model: e.target.value || null }),
             },
-              h("option", { value: "" }, cfg.provider ? "model（留空跟随当前请求）" : "先选 provider"),
+              h("option", { value: "" }, rewriteCfg.provider ? "model（卸载路由必须明确）" : "先选 provider"),
               ...modelChoices.map((id) => {
                 const entry = models.find((candidate) => candidate.id === id);
                 return h("option", { key: id, value: id }, entry && entry.name && entry.name !== id ? entry.name + "（" + id + "）" : id);
               })
             )
+          ) : null,
+          h("div", { style: { display: "grid", gridTemplateColumns: "minmax(0,1fr) 220px", gap: 10, alignItems: "center", marginTop: 10 } },
+            h("div", { style: hint }, advertised
+              ? "该路由公开的档位：" + advertised.map((entry) => (entry.name && entry.name !== entry.id ? entry.id + "（" + entry.name + "）" : entry.id)).join(" / ")
+              : "自动 = 先发 off；宿主拒绝时不发这个字段，由供应商取默认值（改写器会自己思考，慢一些但一定能跑）。"),
+            h("select", {
+              value: currentEffort,
+              style: { ...input, width: "100%", boxSizing: "border-box", padding: "6px 8px" },
+              onChange: (e) => setRewrite({ effort: e.target.value }),
+            },
+              ...effortChoices.map((id) => h("option", { key: id, value: id }, EFFORT_LABELS[id] ?? id))
+            )
+          ),
+          h("div", { style: { display: "grid", gridTemplateColumns: "minmax(0,1fr) 260px", gap: 10, alignItems: "center", marginTop: 10 } },
+            h("div", { style: hint }, "卸载路由失败（网络、鉴权、模型不存在、供应商 5xx）时怎么办。回退会多花一次调用，但这一块不会白白丢掉。"),
+            h("select", {
+              value: rewriteCfg.fallback,
+              style: { ...input, width: "100%", boxSizing: "border-box", padding: "6px 8px" },
+              onChange: (e) => setRewrite({ fallback: e.target.value }),
+            },
+              h("option", { value: "keep" }, "保留原文，不重试"),
+              h("option", { value: "session" }, "回退到会话路由再试一次")
+            )
+          ),
+          h("div", { style: { ...hint, marginTop: 14 } }, "按档位覆盖（可选）：让某一档单独走另一条路由；provider/model 留空就跟随上面的设置。"),
+          h("div", { style: mappingTable },
+            h("div", { style: { ...mappingRow, ...mappingHeadRow, gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)" } },
+              h("div", { style: hint }, "档位"),
+              h("div", { style: hint }, "provider"),
+              h("div", { style: hint }, "model")
+            ),
+            ...catalog.filter((entry) => entry.family !== "off").map((entry) => {
+              const route = strategyRouteOf(entry.id);
+              return h("div", { key: entry.id, style: { ...mappingRow, gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)" } },
+                h("div", { style: monoLabel }, entry.id),
+                h("input", { placeholder: "跟随", value: route.provider, style: { ...input, width: "100%", boxSizing: "border-box" }, onChange: (e) => setStrategyRoute(entry.id, { provider: e.target.value }) }),
+                h("input", { placeholder: "跟随", value: route.model, style: { ...input, width: "100%", boxSizing: "border-box" }, onChange: (e) => setStrategyRoute(entry.id, { model: e.target.value }) })
+              );
+            })
           ),
           catalogNote ? h("div", { style: { ...hint, marginTop: 6 } }, String(catalogNote)) : null
         ),
@@ -1066,6 +1150,12 @@ window.__ModuleLoader__.load({
                           ? "测试未通过：改写器返回了空内容，真实链路上这一块会保留原文"
                           : "测试未通过：改写结果没有变短（" + test.charsIn + " → " + test.charsOut + " 字），真实链路上这一块会保留原文"
           ),
+          test.provider && test.model
+            ? h("div", { style: { ...hint, marginTop: 4 } },
+                "测试路由：" + test.provider + "/" + test.model
+                  + (test.routeSource ? "（来源 " + test.routeSource + "）" : "")
+                  + (test.offloaded ? " · 已卸载到该路由" : ""))
+            : null,
           test.text ? h("div", { style: { ...monoBlock, marginTop: 6, maxHeight: 220, overflow: "auto", background: "rgba(127,127,127,0.08)", padding: 8, borderRadius: 6 } }, String(test.text)) : null
         ) : null,
         recent.length ? h("div", { style: section },

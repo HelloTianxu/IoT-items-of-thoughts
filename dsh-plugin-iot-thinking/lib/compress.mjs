@@ -11,6 +11,7 @@ import {
   rememberEffortPlan,
 } from "./effort.mjs";
 import { DEFAULT_STRATEGY, limitsOf, strategyById } from "./strategies.mjs";
+import { isOffloaded, normalizeRouteTarget, resolveRewriteRoute } from "./route.mjs";
 
 /** 改写结果 + 账本载荷。是否真的替换由 stream.mjs 判定后写进 replaced。 */
 function rewritten(text, payload) {
@@ -41,16 +42,39 @@ function withTimeout(promise, timeoutMs, label) {
 /** cfg 是 resolveConfig 的结果（strategy / limits / route 已就位）。返回 null 表示保留原文。 */
 export async function compressThinking({ Llm, ctx, text, options, cfg, index, extra, archive, mark }) {
   const started = Date.now();
-  const provider = cfg.provider || options.provider;
-  const model = cfg.model || options.model;
   const strategy = strategyById(cfg.strategy) ?? strategyById(DEFAULT_STRATEGY);
   const limits = cfg.limits ?? limitsOf(strategy.id, cfg.strategies?.[strategy.id]);
   const recent = Array.isArray(extra?.recent) ? extra.recent : [];
 
-  if (!provider || !model) {
-    mark("thinking-skipped", { index, strategy: strategy.id, reason: "no-route" });
+  // 改写器路由：档位覆盖 > rewrite 块 > 跟随当前请求。必须在钩子内部解析，
+  // 因为档位是按会话/preset 选出来的，路由得跟着档位走。
+  const sessionRoute = normalizeRouteTarget({ provider: options.provider, model: options.model });
+  const route = resolveRewriteRoute(cfg, strategy.id, sessionRoute);
+  if (!route.provider || !route.model) {
+    mark("thinking-skipped", { index, strategy: strategy.id, reason: "no-route", routeSource: route.source });
     return null;
   }
+
+  let offloaded = isOffloaded(route);
+  mark("rewrite-route", {
+    index,
+    strategy: strategy.id,
+    provider: route.provider,
+    model: route.model,
+    source: route.source,
+    offloaded,
+  });
+
+  // 卸载路由失败时是否回退到会话路由。只回退一次，且只在两条路由确实不同时回退 ——
+  // 否则同一路由会被连打两次，把一次网络抖动变成两次计费。
+  const canFallback =
+    cfg.rewrite?.fallback === "session" &&
+    sessionRoute !== null &&
+    offloaded &&
+    (sessionRoute.provider !== route.provider || sessionRoute.model !== route.model);
+
+  /** 当前实际使用的路由；回退后会被替换。 */
+  let active = route;
 
   const maxChars = Number.isFinite(limits.maxChars) ? Math.max(1, limits.maxChars) : 24000;
   if (text.length > maxChars) {
@@ -73,8 +97,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
           sessionId: options.sessionId,
           index,
           text,
-          provider,
-          model,
+          provider: route.provider,
+          model: route.model,
           strategy: strategy.id,
           // 预设文件路径也进归档头，便于事后区分"改写坏了"还是"预设不对"。
           ...(state?.path ? { style: state.path } : {}),
@@ -83,22 +107,22 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   const maxTokens = Number.isFinite(limits.maxTokens) ? Math.max(1, limits.maxTokens) : 2000;
   const temperature = Number.isFinite(limits.temperature) ? limits.temperature : 0.2;
 
-  // auto：先试 off，被拒则按路由公开的档位降级。
-  const mode = normalizeEffort(cfg.reasoningEffort) ?? AUTO_EFFORT;
-  const key = planKey(provider, model, mode);
+  // auto：先试 off，被拒则按路由公开的档位降级。改写器自己的档位可以单独配
+  // （rewrite.effort），不必跟着会话走。
+  const mode = normalizeEffort(cfg.rewrite?.effort ?? cfg.reasoningEffort) ?? AUTO_EFFORT;
   /** 最后一次实际发出的档位；null = 没发这个字段。 */
   let effortSent = null;
   let effortFallback = false;
   let called = false;
 
-  const run = async (instruction, temperatureForCall, effort) => {
+  const run = async (instruction, temperatureForCall, effort, target) => {
     const assembler = new Llm.BlockAssembler();
     effortSent = effort;
     called = true;
     try {
       const stream = ctx.llm.stream({
-        provider,
-        model,
+        provider: target.provider,
+        model: target.model,
         // 不发字段 = 交给适配器默认值；off 仍是快路径（不花预算在自己的思考上）。
         ...(effort === null ? {} : { reasoningEffort: effort }),
         temperature: temperatureForCall,
@@ -152,17 +176,17 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    *
    * @returns {Promise<{ answered: boolean, effort: string|null }>}
    */
-  const probeLowEffort = async () => {
+  const probeLowEffort = async (target) => {
     const llm = (typeof ctx.get === "function" ? ctx.get("llm") : undefined) ?? ctx?.llm;
     if (typeof llm?.resolveModelInfo !== "function") return { answered: false, effort: null };
     try {
-      const info = await withTimeout(llm.resolveModelInfo(provider, model, options.signal), EFFORT_PROBE.timeoutMs, "resolveModelInfo");
+      const info = await withTimeout(llm.resolveModelInfo(target.provider, target.model, options.signal), EFFORT_PROBE.timeoutMs, "resolveModelInfo");
       return { answered: true, effort: pickLowEffort((info?.reasoning?.efforts ?? []).map((effort) => effort?.id)) };
     } catch (error) {
       mark("thinking-effort-probe-failed", {
         index,
-        provider,
-        model,
+        provider: target.provider,
+        model: target.model,
         message: String(error?.message ?? error),
       });
       return { answered: false, effort: null };
@@ -173,11 +197,16 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    * One rewriter attempt, including the effort-level recovery. The recovery is
    * not a retry of a failed rewrite: the request never reached the provider,
    * so it costs one local round-trip, and an answered route decision is cached.
+   *
+   * `target` is the route this attempt goes to; the effort decision is cached
+   * per route+mode, so an offloaded route never inherits the session route's
+   * verdict.
    */
-  const attempt = async (instruction, temperatureForCall, stage) => {
+  const attempt = async (instruction, temperatureForCall, stage, target) => {
+    const key = planKey(target.provider, target.model, mode);
     const known = knownEffortPlan(key);
     const send = known !== undefined ? known : mode === AUTO_EFFORT ? "off" : mode;
-    let result = await run(instruction, temperatureForCall, send);
+    let result = await run(instruction, temperatureForCall, send, target);
     if (!result.error || !isUnsupportedEffortFailure(result)) return result;
 
     // `null` means "send no effort at all". If even that is refused, the adapter's
@@ -186,8 +215,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     if (send === null) {
       mark("thinking-effort-unsupported", {
         index,
-        provider,
-        model,
+        provider: target.provider,
+        model: target.model,
         stage,
         requested: null,
         reason: "adapter-default-unsupported",
@@ -198,8 +227,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
 
     mark("thinking-effort-fallback", {
       index,
-      provider,
-      model,
+      provider: target.provider,
+      model: target.model,
       stage,
       requested: send,
       reason: "unsupported",
@@ -208,16 +237,16 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     // Only auto mode goes looking for a cheap supported level. An explicit
     // choice that the route refuses is a configuration signal, not a hint to
     // pick some other level: send nothing and let the provider decide.
-    const probe = mode === AUTO_EFFORT && send === "off" ? await probeLowEffort() : { answered: true, effort: null };
+    const probe = mode === AUTO_EFFORT && send === "off" ? await probeLowEffort(target) : { answered: true, effort: null };
     let chosen = probe.effort;
-    result = await run(instruction, temperatureForCall, chosen);
+    result = await run(instruction, temperatureForCall, chosen, target);
     effortFallback = true;
     // An adapter can advertise a level the host then refuses anyway (stale or
     // optimistic catalog). Omitting the field is the remaining option, so try it
     // once instead of leaving the route pinned on a level that fails every block.
     if (probe.answered && chosen !== null && isUnsupportedEffortFailure(result)) {
       chosen = null;
-      result = await run(instruction, temperatureForCall, chosen);
+      result = await run(instruction, temperatureForCall, chosen, target);
     }
     // "No field at all" refused is the adapter's own default being unadvertised —
     // nothing this plugin can send will work. Name it, and do not cache it: the
@@ -225,8 +254,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     if (chosen === null && isUnsupportedEffortFailure(result)) {
       mark("thinking-effort-unsupported", {
         index,
-        provider,
-        model,
+        provider: target.provider,
+        model: target.model,
         stage,
         requested: null,
         reason: "adapter-default-unsupported",
@@ -240,8 +269,10 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
 
   const payload = (fields) => ({
     index,
-    provider,
-    model,
+    provider: active.provider,
+    model: active.model,
+    routeSource: active.source,
+    offloaded,
     strategy: strategy.id,
     // `effort: null` is meaningful only after a call went out (the field was
     // omitted); a draft skipped before the model has no effort.
@@ -269,7 +300,26 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       mark("thinking-skipped", { index, strategy: strategy.id, reason: "no-prompt", stage });
       return { done: true, value: null };
     }
-    const result = await attempt(instruction, temperatureForCall, stage);
+    let result = await attempt(instruction, temperatureForCall, stage, active);
+
+    // 卸载路由失败（网络、鉴权、模型不存在、供应商 5xx）时，按配置回退到会话路由
+    // 再试一次。只回退一次，且用户按 Esc 中断不重试 —— 中断是用户的决定，不是路由的错。
+    if (result.error && canFallback && result.code !== "ABORTED") {
+      const from = { provider: active.provider, model: active.model };
+      active = { ...sessionRoute, source: "session" };
+      offloaded = false;
+      mark("rewrite-route-fallback", {
+        index,
+        strategy: strategy.id,
+        stage,
+        from,
+        to: { provider: active.provider, model: active.model },
+        reason: result.error,
+        code: result.code,
+      });
+      result = await attempt(instruction, temperatureForCall, `${stage}:fallback`, active);
+    }
+
     if (result.error) {
       // Esc/超时记 skipped，不算失败。
       if (result.code === "ABORTED") {
@@ -278,8 +328,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       }
       mark("thinking-failed", {
         index,
-        provider,
-        model,
+        provider: active.provider,
+        model: active.model,
         strategy: strategy.id,
         ms: Date.now() - started,
         message: result.error,

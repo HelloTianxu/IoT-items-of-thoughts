@@ -121,6 +121,78 @@ export function resolveConfig(cfg, who = {}) {
   };
 }
 
+/**
+ * 一条显式路由目标：provider 与 model 必须同时给出。
+ *
+ * 只填一半不算"配了"——跨 provider 猜 model 名（比如把 A 家的小模型名塞给 B 家）
+ * 比直接回退更危险，所以这里宁可判为无效、让调用方继续往下掉一层。
+ *
+ * @param {unknown} value
+ * @returns {{provider: string, model: string}|null}
+ */
+export function normalizeRouteTarget(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const provider = typeof value.provider === "string" ? value.provider.trim() : "";
+  const model = typeof value.model === "string" ? value.model.trim() : "";
+  if (!provider || !model) return null;
+  return { provider, model };
+}
+
+/**
+ * 改写器路由（算力卸载）：`strategies[<档位>]` > `rewrite` > 跟随当前请求。
+ *
+ * 三层都要在钩子内部解析：档位是按会话/按 preset 选出来的，路由得跟着档位走。
+ * `source` 是记账与卡片展示用的证据；`none` 表示没有可用路由 —— 那种情况下
+ * 块保留原文，绝不拿一个猜出来的 provider/model 去调。
+ *
+ * @param {object} cfg
+ * @param {string} strategyId
+ * @param {{provider?: unknown, model?: unknown}|null} [sessionRoute] 当前请求的路由
+ * @returns {{provider: string|null, model: string|null, source: "strategy"|"config"|"session"|"none", key?: string}}
+ */
+export function resolveRewriteRoute(cfg, strategyId, sessionRoute = null) {
+  const overrides = cfg?.strategies && typeof cfg.strategies === "object" ? cfg.strategies[strategyId] : undefined;
+  const fromStrategy = normalizeRouteTarget(overrides);
+  if (fromStrategy) return { ...fromStrategy, source: "strategy", key: String(strategyId) };
+
+  // `cfg.rewrite` 是 v0.3 的形状；顶层 provider/model 是旧形状，读得懂但不再写回。
+  const fromConfig = normalizeRouteTarget(cfg?.rewrite) ?? normalizeRouteTarget(cfg);
+  if (fromConfig) return { ...fromConfig, source: "config" };
+
+  const fromSession = normalizeRouteTarget(sessionRoute);
+  if (fromSession) return { ...fromSession, source: "session" };
+
+  return { provider: null, model: null, source: "none" };
+}
+
+/** 这条路由是否把压缩调用卸载到了会话路由之外。 */
+export function isOffloaded(route) {
+  return route?.source === "strategy" || route?.source === "config";
+}
+
+const LEGACY_ROUTE_KEYS = Object.freeze(["provider", "model", "reasoningEffort"]);
+
+/**
+ * 旧形状（顶层 provider/model/reasoningEffort）→ v0.3 的 `rewrite` 块。
+ *
+ * 迁移是行为不变的：原来"指定了就卸载、留空就跟随会话"，迁移后完全一样。
+ * 搬完必须删旧键 —— 留着的话，用户以后在卡片里把 rewrite 清空，旧值会通过
+ * `resolveRewriteRoute` 的旧形状兜底重新活过来。
+ */
+export function migrateRewriteConfig(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const stray = LEGACY_ROUTE_KEYS.filter((key) => raw[key] !== undefined);
+  if (stray.length === 0) return raw;
+  const current = raw.rewrite && typeof raw.rewrite === "object" && !Array.isArray(raw.rewrite) ? raw.rewrite : {};
+  const rewrite = { ...current };
+  if (rewrite.provider === undefined && typeof raw.provider === "string") rewrite.provider = raw.provider;
+  if (rewrite.model === undefined && typeof raw.model === "string") rewrite.model = raw.model;
+  if (rewrite.effort === undefined && typeof raw.reasoningEffort === "string") rewrite.effort = raw.reasoningEffort;
+  const next = { ...raw, rewrite };
+  for (const key of LEGACY_ROUTE_KEYS) delete next[key];
+  return next;
+}
+
 const LEGACY_FLAT_KEYS = Object.freeze(["profile", "minChars", "maxChars", "maxTokens", "maxNodes", "maxNeutral"]);
 
 /**
