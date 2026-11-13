@@ -12,6 +12,7 @@
 import { normalizeRouteTarget } from "./route.mjs";
 import {
   AUTO_EFFORT,
+  combineSignals,
   isUnsupportedEffortFailure,
   isUnsupportedTemperatureFailure,
   knownTemperaturePlan,
@@ -147,7 +148,7 @@ export function formatAdvice(raw, limits = {}) {
  */
 async function effortForAdvisor({ ctx, route, requested, options, onEvent }) {
   const mode = normalizeEffort(requested) ?? AUTO_EFFORT;
-  const key = planKey(route.provider, route.model, mode);
+  const key = planKey(route.provider, route.model, mode, "advisor");
   const known = knownEffortPlan(key);
   const send = known !== undefined ? known : mode === AUTO_EFFORT ? "off" : mode;
   return { mode, key, send };
@@ -167,7 +168,7 @@ async function probeLowEffortForAdvisor({ ctx, route, options, onEvent }) {
 
 export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace, effort, temperature, maxTokens }) {
   const controller = typeof AbortController === "function" ? new AbortController() : null;
-  const signal = controller?.signal ?? options?.signal;
+  const signal = combineSignals(controller?.signal, options?.signal);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;

@@ -50,8 +50,16 @@ export function switchSessionStrategy({ store, sessionId, preset, rawInput, mark
   }
 
   const sessions = { ...(cfg.sessions ?? {}) };
+  // 会话覆盖是 `{ strategy, guidance }` 两部分：换档位不能把建议开关一起抹掉。
+  // 这与 HTTP 的 `/api/session` 语义保持一致（清档位 ≠ 清整条覆盖）。
+  const existing = sessions[sessionId];
+  const existingGuidance = existing && typeof existing === "object" && !Array.isArray(existing) ? existing.guidance : undefined;
+  const withGuidance = (base) => (existingGuidance === undefined
+    ? base
+    : { ...(typeof base === "object" ? base : { strategy: base }), guidance: existingGuidance });
   if (isClearWord(word)) {
-    delete sessions[sessionId];
+    if (existingGuidance === undefined) delete sessions[sessionId];
+    else sessions[sessionId] = { guidance: existingGuidance };
     store.save({ sessions });
     const route = resolveConfig(store.load(), { sessionId, agentPreset: preset }).route;
     mark?.("strategy-switched", { sessionId, agentPreset: preset ?? null, strategy: null, via: "clear" });
@@ -91,8 +99,8 @@ export function switchSessionStrategy({ store, sessionId, preset, rawInput, mark
         text: "还没贴入任何文本：要么 `/iot preset:<名字>` 用内置或目录里的预设，要么先在设置卡里贴一段。",
       };
     }
-    if (entry.builtin) sessions[sessionId] = { strategy: "custom", preset: `builtin:${entry.builtin}` };
-    else sessions[sessionId] = name ? `custom:${name}` : "custom";
+    if (entry.builtin) sessions[sessionId] = withGuidance({ strategy: "custom", preset: `builtin:${entry.builtin}` });
+    else sessions[sessionId] = withGuidance(name ? `custom:${name}` : "custom");
     store.save({ sessions });
     mark?.("strategy-switched", { sessionId, agentPreset: preset ?? null, strategy: "custom", preset: name, via: "command" });
     return {
@@ -106,7 +114,7 @@ export function switchSessionStrategy({ store, sessionId, preset, rawInput, mark
     return { kind: "error", text: `「${entry.id}」不是角色档，没有规格可选（只有 voice 支持 <策略>:<规格>）` };
   }
 
-  sessions[sessionId] = arg ? { strategy: entry.id, style: arg } : entry.id;
+  sessions[sessionId] = withGuidance(arg ? { strategy: entry.id, style: arg } : entry.id);
   store.save({ sessions });
   mark?.("strategy-switched", {
     sessionId,

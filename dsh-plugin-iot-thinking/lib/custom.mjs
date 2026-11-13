@@ -108,7 +108,10 @@ export function writePreset(dir, filename, text) {
   }
   const body = String(text ?? "");
   if (!body.trim()) return { ok: false, error: "内容为空，不写文件" };
-  if (body.length > MAX_PRESET_BYTES) return { ok: false, error: `内容太大（${body.length} > ${MAX_PRESET_BYTES} 字节）` };
+  // 上限是**字节**：列表用 stat.size 过滤，写入也必须按字节算。
+  // 之前用 body.length（字符），一份 40K 汉字（约 120KB）能写进去却在列表里消失。
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  if (bodyBytes > MAX_PRESET_BYTES) return { ok: false, error: `内容太大（${bodyBytes} > ${MAX_PRESET_BYTES} 字节）` };
   // 没写后缀就补 .md；写了 .md/.txt/.markdown 就照原样保存。
   const name = TEXT_EXTENSIONS.has(extname(clean).toLowerCase()) ? clean : `${clean}.md`;
   try {

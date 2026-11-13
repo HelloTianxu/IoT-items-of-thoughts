@@ -166,8 +166,14 @@ export function resolveConfig(cfg, who = {}) {
   // 指导开关与模式：显式配置优先；没有配置时，指导档位（iot-guided）等价于
   // 内置指导模式 —— 旧配置的行为保持不变。session 覆盖在 resolveConfig 之前
   // 已经折进 cfg.guidance，这里只做"档位推断"这一层兜底。
+  // 只有"文件里真的写过 guidance"才采信它的 enabled；否则按档位推断。
+  // 不这样做的话，DEFAULTS 里的 enabled=false 会把 iot-guided 的推断短路掉。
+  // 标记缺失有两种可能：① 调用方直接传了裸 cfg（测试、自测路由）——那它就是显式；
+  // ② 标记在深拷贝里丢了——同样按显式处理，不能把用户的开关吞掉。
+  const guidanceExplicit = base.__guidanceExplicit === true
+    || (base.__guidanceExplicit === undefined && base.guidance !== undefined);
   const guidanceRaw = base.guidance && typeof base.guidance === "object" ? base.guidance : null;
-  const globalGuidance = guidanceRaw
+  const globalGuidance = guidanceExplicit && guidanceRaw
     ? { enabled: guidanceRaw.enabled === true, mode: guidanceRaw.mode === "builtin" ? "builtin" : "external" }
     : route.id === "iot-guided"
       ? { enabled: true, mode: "builtin" }
@@ -186,11 +192,14 @@ export function resolveConfig(cfg, who = {}) {
         mode: sessionOverride.mode === "builtin" || sessionOverride.mode === "external" ? sessionOverride.mode : globalGuidance.mode,
       };
 
-  // custom 档位的输出约束：只对自定义预设生效（三档基础模式有自己的节点预算）。
+  // 输出约束。
+  // `maxOut` 只对自定义预设生效（三档基础模式有自己的节点预算）。
+  // `noThink` 是**跨档位**的：compress 对所有档位都执行 hasThinkTag 门禁，
+  // 提示词也必须对所有档位说"不要输出思考标记"，否则模型不知道会被拒。
   if (route.id === "custom") {
     if (Number.isFinite(base.maxOut)) limits.maxOut = Math.max(0, Math.floor(base.maxOut));
-    if (base.noThink === true) limits.noThink = true;
   }
+  if (base.noThink !== false) limits.noThink = true;
 
   const off = strategy?.family === "off";
   return {

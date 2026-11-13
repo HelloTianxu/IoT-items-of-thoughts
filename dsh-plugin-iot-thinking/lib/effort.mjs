@@ -24,8 +24,9 @@ export function normalizeEffort(value) {
   return EFFORT_SHAPE.test(effort) ? effort : null;
 }
 
-export function planKey(provider, model, mode) {
-  return `${provider ?? ""}\u0000${model ?? ""}\u0000${mode ?? AUTO_EFFORT}`;
+export function planKey(provider, model, mode, role = "rewrite") {
+  // role 必须进 key：建议链与改写链的降级结论不能互相复用。
+  return `${role ?? "rewrite"}\u0000${provider ?? ""}\u0000${model ?? ""}\u0000${mode ?? AUTO_EFFORT}`;
 }
 
 export function knownEffortPlan(key) {
@@ -86,4 +87,27 @@ export function rememberTemperaturePlan(key, value) {
 
 export function resetTemperaturePlans() {
   TEMPERATURE_PLANS.clear();
+}
+
+/**
+ * 把宿主的取消信号和本插件自己的超时控制器合成一个。
+ *
+ * 直接 `controller.signal ?? options.signal` 是错的：AbortController 在 Node 20
+ * 恒存在，宿主的 Esc/取消信号永远拿不到，用户中断后请求还会跑满超时，白烧 token。
+ */
+export function combineSignals(controllerSignal, hostSignal) {
+  if (!controllerSignal) return hostSignal;
+  if (!hostSignal) return controllerSignal;
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+    return AbortSignal.any([controllerSignal, hostSignal]);
+  }
+  // 老环境：手动转发一次，只转发 abort（不复制 reason，够用）。
+  const controller = new AbortController();
+  const forward = () => controller.abort();
+  if (controllerSignal.aborted || hostSignal.aborted) controller.abort();
+  else {
+    controllerSignal.addEventListener("abort", forward, { once: true });
+    hostSignal.addEventListener("abort", forward, { once: true });
+  }
+  return controller.signal;
 }

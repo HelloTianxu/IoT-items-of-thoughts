@@ -5,7 +5,7 @@
  *   node selftest.mjs
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import vm from "node:vm";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import {
   sanitizeDraft,
 } from "./lib/think.mjs";
 import { compressThinking, EFFORT_PROBE, REWRITE_BUDGET, REWRITE_TIMEOUT } from "./lib/compress.mjs";
+import { DEFAULTS } from "./lib/config-store.mjs";
 import {
   AUTO_EFFORT,
   EFFORT_IDS,
@@ -1675,6 +1676,225 @@ await check("配置存储：rewrite 块只收已知键，非法 fallback 落回 
   const second = store.load();
   assert.equal(second.rewrite.provider, "local-p", "只改 model 时 provider 必须保留");
   assert.equal(second.rewrite.model, "other");
+});
+
+await check("一键测试：选预设时真的测那份预设，不静默回落到全局档位", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-test-preset-")), "config.json"));
+  store.save({ strategy: "iot-full", rewrite: { provider: "p", model: "m" }, defaultPreset: "builtin:standard" });
+  const seen = [];
+  registerConfigApi(testCtx(ws), store, {
+    rewrite: async (text, options, cfg) => {
+      seen.push({ strategy: cfg.strategy, preset: cfg.limits?.preset?.name ?? cfg.limits?.preset?.kind ?? null });
+      return { text: "[决定] 甲。", event: { strategy: cfg.strategy, finish: "stop" } };
+    },
+    getRoute: () => ({ provider: "p", model: "m" }),
+  });
+
+  const res = await ws.call("/iot-thinking/api/test", {
+    method: "POST",
+    body: JSON.stringify({ strategy: { strategy: "custom", preset: "builtin:standard" }, text: DRAFT.repeat(3) }),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(seen[0].strategy, "custom", "要测 custom 档，而不是全局默认档");
+  assert.equal(seen[0].preset, "standard", "要带上内置预设名");
+});
+
+await check("策略原文接口：自定义预设带文件名时不 500", async () => {
+  const ws = fakeWebServer();
+  const dir = mkdtempSync(join(tmpdir(), "iot-preset-dir-"));
+  writeFileSync(join(dir, "mine.md"), "先确认事实，再给结论。", "utf8");
+  const store = new ConfigStore(join(dir, "config.json"));
+  store.save({ presetDir: dir });
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const res = await ws.call("/iot-thinking/api/strategy", { url: "/iot-thinking/api/strategy?id=custom&preset=mine.md" });
+  assert.equal(res.statusCode, 200, "不能 500：" + JSON.stringify(res.payload));
+  assert.ok(String(res.payload.prompt ?? res.payload.text ?? "").includes("先确认事实"), "要带上预设正文：" + JSON.stringify(res.payload));
+});
+
+await check("内置建议不占节点预算：iot-full + builtin 模式下建议不被截掉", () => {
+  const strategy = strategyById("iot-full");
+  const raw = [
+    "[决定] 先把替换闸门的判定顺序写成测试。",
+    "[反对] 不要在每个块结束路径上做同步等待。",
+    "[计划] 再改设置卡里的档位选择与提示词。",
+    "[旁观者建议] 先补一个替换闸门的测试，再动 UI。",
+  ].join("\n\n");
+  const verdict = strategy.finalize(raw, {
+    original: Array.from({ length: 40 }, (_, i) => "第" + i + "句草稿，内容各不相同。").join(""),
+    limits: { maxNodes: 2, maxNeutral: 0 },
+    allowAdvice: true,
+  });
+  assert.equal(verdict.ok, true, "finalize 失败原因：" + JSON.stringify(verdict.reason ?? verdict));
+  assert.ok(verdict.text.includes("[旁观者建议] 先补一个替换闸门的测试，再动 UI。"), "建议节点必须留下");
+  // 不计入预算：压缩节点被截到 2 条，建议仍在。
+  assert.equal(verdict.text.split("\n\n").length, 3);
+});
+
+await check("会话建议覆盖穿过保存与归一化：不因保存档位而被抹掉", async () => {
+  const ws = fakeWebServer();
+  const dir = mkdtempSync(join(tmpdir(), "iot-session-keep-"));
+  const store = new ConfigStore(join(dir, "config.json"));
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  // 卡片保存：sessions 表里带 guidance 的对象形态。
+  const put = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({
+      sessions: {
+        "s-keep": { strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } },
+        "s-only": { guidance: { enabled: false } },
+      },
+    }),
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual(put.payload.config.sessions["s-keep"], { strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } });
+  assert.deepEqual(put.payload.config.sessions["s-only"], { guidance: { enabled: false } }, "只含 guidance 的条目不能丢");
+
+  // 重读磁盘：必须还在（之前会在这里消失）。
+  const reloaded = store.load();
+  assert.deepEqual(reloaded.sessions["s-keep"].guidance, { enabled: true, mode: "builtin" });
+  assert.deepEqual(reloaded.sessions["s-only"], { guidance: { enabled: false } });
+});
+
+await check("session API：只传 guidance 时保留档位，不报 400", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-guidance-only-")), "config.json"));
+  store.save({ sessions: { s1: { strategy: "iot-full" } } });
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const res = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s1", guidance: { enabled: true, mode: "builtin" } }),
+  });
+  assert.equal(res.statusCode, 200, "只改建议不该 400：" + JSON.stringify(res.payload));
+  assert.deepEqual(res.payload.override, { strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } }, "档位必须保留");
+
+  const empty = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s1" }),
+  });
+  assert.equal(empty.statusCode, 400, "两个字段都不给要报错");
+});
+
+await check("旧配置迁移：只有 advisor.enabled 的旧文件，升级后外部建议要真的开着", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-legacy-advisor-"));
+  const file = join(dir, "config.json");
+  writeFileSync(file, JSON.stringify({ strategy: "iot-full", advisor: { enabled: true, route: { provider: "strong", model: "s" } } }), "utf8");
+  const store = new ConfigStore(file);
+  const cfg = store.load();
+  assert.equal(cfg.guidance.enabled, true, "旧 advisor.enabled 必须折进 guidance.enabled");
+  assert.equal(cfg.guidance.mode, "external");
+  // 再存一次不能把它翻回去。
+  store.save({ strategy: "iot-full" });
+  assert.equal(store.load().guidance.enabled, true, "保存后仍要开着");
+});
+
+await check("档位推断：iot-guided 没写 guidance 时等价内置建议", () => {
+  const guided = resolveConfig({ strategy: "iot-guided" }, { sessionId: "s" });
+  assert.deepEqual(guided.guidance, { enabled: true, mode: "builtin" });
+  // 显式关掉时以用户为准，档位推断不能覆盖它。
+  const off = resolveConfig({ strategy: "iot-guided", guidance: { enabled: false, mode: "external" } }, { sessionId: "s" });
+  assert.equal(off.guidance.enabled, false, "显式关闭要生效");
+});
+
+await check("/iot 切换档位保留会话建议覆盖，/iot auto 也不清建议", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-switch-guidance-"));
+  const store = new ConfigStore(join(dir, "config.json"));
+  store.save({ sessions: { s1: { strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } } } });
+
+  const switched = switchSessionStrategy({ store, sessionId: "s1", rawInput: "iot-balanced" });
+  assert.equal(switched.kind, "success");
+  const afterSwitch = store.load().sessions["s1"];
+  assert.equal(afterSwitch.strategy, "iot-balanced");
+  assert.deepEqual(afterSwitch.guidance, { enabled: true, mode: "builtin" }, "换档位不能抹掉建议");
+
+  const cleared = switchSessionStrategy({ store, sessionId: "s1", rawInput: "auto" });
+  assert.equal(cleared.kind, "success");
+  assert.deepEqual(store.load().sessions["s1"], { guidance: { enabled: true, mode: "builtin" } }, "auto 只清档位");
+});
+
+await check("debugChunks 能落盘：不在 DEFAULTS 之外的键不该被静默丢弃", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-debug-chunks-"));
+  const store = new ConfigStore(join(dir, "config.json"));
+  store.save({ debugChunks: false });
+  assert.equal(store.load().debugChunks, false, "debugChunks=false 必须保留");
+});
+
+await check("数字字段清空：null 落盘为默认值，不是被忽略", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-null-num-")), "config.json"));
+  store.save({ rewriteTimeoutMs: 60000, rewriteBudget: 6, maxChars: 20000 });
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const res = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ rewriteTimeoutMs: null, rewriteBudget: null, maxChars: null }),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.config.rewriteTimeoutMs, DEFAULTS.rewriteTimeoutMs, "清空要回默认");
+  assert.equal(res.payload.config.rewriteBudget, DEFAULTS.rewriteBudget);
+  assert.equal(res.payload.config.maxChars, DEFAULTS.maxChars);
+});
+
+await check("effort 缓存按角色隔离：建议链的探测不影响改写链", () => {
+  resetEffortPlans();
+  rememberEffortPlan(planKey("p", "m", "auto", "advisor"), null);
+  assert.equal(knownEffortPlan(planKey("p", "m", "auto", "rewrite")), undefined, "改写链不该读到建议链的结论");
+  assert.equal(knownEffortPlan(planKey("p", "m", "auto", "advisor")), null);
+  resetEffortPlans();
+});
+
+await check("noThink 跨档位：三档基础模式的提示词也要禁止输出思考标记", () => {
+  const cfg = resolveConfig({ strategy: "iot-full" }, { sessionId: "s" });
+  assert.equal(cfg.limits.noThink, true, "noThink 默认要开");
+  const prompt = strategyById("iot-full").buildPrompt(DRAFT, { strict: false, reason: null, detail: null, limits: cfg.limits });
+  assert.ok(prompt.includes("不要输出 `<thinking>`"), "提示词必须说清楚");
+});
+
+await check("预设大小按字节判定：中文大预设不会写完就从列表消失", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-preset-bytes-"));
+  const store = new ConfigStore(join(dir, "config.json"));
+  store.save({ presetDir: dir });
+  const ws = fakeWebServer();
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  // 汉字 3 字节：22000 字 ≈ 66KB，超过 64KB 上限，必须被拒绝（而不是写进去再消失）。
+  const big = "汉".repeat(22000);
+  const res = await ws.call("/iot-thinking/api/preset-dir", {
+    method: "POST",
+    body: JSON.stringify({ name: "big.md", text: big }),
+  });
+  assert.equal(res.statusCode, 400, "超字节上限要拒绝");
+});
+
+await check("压缩首轮失败时丢弃建议，晚到的建议不记 ready", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        if (options.model === "strong") {
+          return (async function* () {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            yield { type: "text-delta", index: 0, text: "[旁观者建议] 先补测试。" };
+            yield { type: "finish", reason: { kind: "stop" } };
+          })();
+        }
+        return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "boom", code: "E" } } }]);
+      },
+    },
+  };
+  const cfg = {
+    strategy: "iot-full",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { route: { provider: "strong", model: "strong" }, wait: true },
+    guidance: { enabled: true, mode: "external" },
+  };
+  const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
+  assert.equal(result, null, "首轮失败要回原文");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.ok(!events.some((entry) => entry.event === "advisor-ready"), "没被采用的建议不该记 ready");
 });
 
 await check("配置存储：advisor.wait/maxTokens 归一化，且增量保存不抹掉 route", () => {

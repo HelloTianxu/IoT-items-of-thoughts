@@ -3,6 +3,7 @@
 
 import {
   AUTO_EFFORT,
+  combineSignals,
   isUnsupportedEffortFailure,
   isUnsupportedTemperatureFailure,
   knownTemperaturePlan,
@@ -187,7 +188,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     called = true;
     // 超时要真的把请求停掉，否则后台还在吐字、白烧 token。
     const controller = typeof AbortController === "function" ? new AbortController() : null;
-    const signal = controller?.signal ?? options.signal;
+    // 宿主取消（Esc）与自己的超时都必须能中断这次调用。
+    const signal = combineSignals(controller?.signal, options?.signal);
     let timedOut = false;
     let usage = null;
     // 默认收集：只记类型/长度，不记正文，成本很小；对端到底有没有 reasoning
@@ -311,7 +313,9 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    * verdict.
    */
   const attempt = async (instruction, temperatureForCall, stage, target) => {
-    const key = planKey(target.provider, target.model, mode);
+    // role 进 key：建议链与改写链各自记账，不能互相污染（建议链探测失败曾把
+    // 改写链的 off 快路径永久关掉）。
+    const key = planKey(target.provider, target.model, mode, "rewrite");
     const known = knownEffortPlan(key);
     const send = known !== undefined ? known : mode === AUTO_EFFORT ? "off" : mode;
     // temperature 决策也按路由记住：有的模型只接受默认值（例如 GPT-6 Astra 只认 1），
@@ -369,14 +373,16 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     // pick some other level: send nothing and let the provider decide.
     const probe = mode === AUTO_EFFORT && send === "off" ? await probeLowEffort(target) : { answered: true, effort: null };
     let chosen = probe.effort;
-    result = await run(instruction, temperatureForCall, chosen, target);
+    // 用**已经验证过**的 temperature：这一轮可能刚因为不支持 0.2 把字段去掉了，
+    // 再发原始值会立刻又 400，降级链白跑。
+    result = await run(instruction, temperatureToSend, chosen, target);
     effortFallback = true;
     // An adapter can advertise a level the host then refuses anyway (stale or
     // optimistic catalog). Omitting the field is the remaining option, so try it
     // once instead of leaving the route pinned on a level that fails every block.
     if (probe.answered && chosen !== null && isUnsupportedEffortFailure(result)) {
       chosen = null;
-      result = await run(instruction, temperatureForCall, chosen, target);
+      result = await run(instruction, temperatureToSend, chosen, target);
     }
     // "No field at all" refused is the adapter's own default being unadvertised —
     // nothing this plugin can send will work. Name it, and do not cache it: the
@@ -672,7 +678,14 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       return { done: false, reason: "no-label", detail: "output", finish: result.finish };
     }
 
-    const verdict = strategy.finalize(result.output, { original: text, limits, state, recent });
+    const verdict = strategy.finalize(result.output, {
+      original: text,
+      limits,
+      state,
+      recent,
+      // 内置建议模式：让 finalize 知道 [旁观者建议] 不计入节点预算。
+      allowAdvice: guidanceOn && guidance.mode === "builtin",
+    });
     if (verdict.ok) {
       // 防御：档位没回 text 时（自定义预设早期版本就这样）退回原始输出，不在这里抛。
       const out = typeof verdict.text === "string" ? verdict.text : String(result.output ?? "").trim();
@@ -723,8 +736,17 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
 
   // 指导与压缩并发：先启动指导请求，压缩照常跑；压缩失败时这个 Promise 会被丢弃。
   const pendingAdvice = startAdvice();
+  // 压缩首轮就失败时，这一块不会再收建议：标记丢弃，晚到的结果不再记 ready。
+  const discardAdvice = () => {
+    if (!pendingAdvice) return;
+    adviceState.discarded = true;
+  };
   const first = await pass({ strict: false, reason: null, detail: null, stage: "first", temperatureForCall: temperature });
-  if (first.done) return first.value;
+  if (first.done) {
+    // 首轮就出结论（成功已在 pass 里收过建议；失败则这一块不会再收）。
+    if (!first.value) discardAdvice();
+    return first.value;
+  }
 
   // 不合格：按策略给的原因重试一次（更低温、带针对性指令）。
   // 事件名由策略决定：items 沿用 thinking-degenerate（历史账本与审计脚本认它），
@@ -749,6 +771,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   if (second.done) {
     // 重试本身没拿到结果（报错/中止）：回原文。改写器没给出结果时拿兜底内容
     // 替换正文，等于把"没改好"降级成"内容被砍成两句"——那比不改糟。
+    if (!second.value) discardAdvice();
     return second.value;
   }
 
@@ -764,6 +787,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       retried: true,
       action: "skip",
     });
+    discardAdvice();
     return null;
   }
 
@@ -782,6 +806,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       detail: second.detail,
       retried: true,
     });
+    // 确定性兜底不带建议：它不是模型按预设改写的结果，建议与它没有对应关系。
+    discardAdvice();
     return rewritten(
       fallbackText,
       payload({
@@ -801,5 +827,6 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     charsIn: text.length,
   });
   mark("block-kept", { index, strategy: strategy.id, charsIn: text.length, reason: second.reason ?? "rejected" });
+  discardAdvice();
   return null;
 }

@@ -63,10 +63,16 @@ function itemsStrategy({ id, label, profile, summary, defaults }) {
     // 空文本时行为与旧版完全一致（不注入任何额外要求）。
     buildPrompt: (draft, { strict, limits, extraPrompt, allowAdvice }) =>
       buildCompressionPrompt(draft, { profile, strict, limits, extraPrompt, allowAdvice }),
-    finalize: (raw, { limits }) => {
+    finalize: (raw, { limits, allowAdvice }) => {
       // 先看原始输出：formatNodes 会把退化输出整理得"看起来正常"。
       const rawDegenerate = isDegenerateItems(raw);
-      const text = formatNodes(raw, { profile, maxNodes: limits.maxNodes, maxNeutral: limits.maxNeutral });
+      const text = formatNodes(raw, {
+        profile,
+        maxNodes: limits.maxNodes,
+        maxNeutral: limits.maxNeutral,
+        // 内置建议模式：建议节点不计入预算，也不能被当成未知标签裁掉。
+        allowAdvice: allowAdvice === true,
+      });
       if (rawDegenerate) return { ok: false, text, reason: "degenerate", detail: "raw" };
       if (!text) return { ok: false, text, reason: "empty" };
       if (isDegenerateItems(text)) return { ok: false, text, reason: "degenerate" };

@@ -563,8 +563,20 @@ window.__ModuleLoader__.load({
           return;
         }
         setStrategyDetail({ id, strategy, loading: true });
+        // `custom:名字` / `builtin:名字` 不是注册表里的档位 id：拆成 id + preset，
+        // 否则服务端 strategyById 找不到，直接 404。
+        const text = typeof strategy === "string" ? strategy : "";
+        const qs = new URLSearchParams();
+        if (text.startsWith("custom:")) {
+          qs.set("id", "custom");
+          qs.set("preset", text.slice("custom:".length));
+        } else if (text.startsWith("builtin:")) {
+          qs.set("id", "custom");
+          qs.set("preset", text);
+        } else {
+          qs.set("id", text);
+        }
         try {
-          const qs = new URLSearchParams({ id: strategy });
           const resp = await fetch(STRATEGY + "?" + qs.toString(), { headers: GUARD });
           const data = await resp.json().catch(() => null);
           if (alive.current) setStrategyDetail({ id, strategy, ...(resp.ok && data ? data : { error: "读取失败" }) });
@@ -585,9 +597,15 @@ window.__ModuleLoader__.load({
       /** 一行映射的规范化读法：老文件里的对象形态取 `strategy`。 */
       const entryOf = (preset) => {
         const raw = cfg.agentPresets?.[preset];
-        if (typeof raw === "string") return { strategy: raw };
-        if (raw && typeof raw === "object") return { strategy: String(raw.strategy ?? "") };
-        return { strategy: "" };
+        if (typeof raw === "string") return { strategy: raw, preset: null };
+        if (raw && typeof raw === "object") {
+          return {
+            strategy: String(raw.strategy ?? ""),
+            // 对象形态带的 preset 是"用哪份规格"：丢了它，下拉会显示成"贴入的文本"。
+            preset: typeof raw.preset === "string" && raw.preset.trim() ? raw.preset.trim() : null,
+          };
+        }
+        return { strategy: "", preset: null };
       };
 
       // 新增行默认挑一个还没映射的 preset，省得用户面对一个空下拉不知道怎么添加。
@@ -726,8 +744,14 @@ window.__ModuleLoader__.load({
       const activeId = cfg.strategy ?? "iot-full";
       // custom 档位下"用哪份规格"有两条来源：strategy 里的 `custom:名字`（旧写法），
       // 或全局 defaultPreset（内置预设走这条，不占 strategy 名字空间）。
+      // `custom:文件名` 已经把"用哪份规格"写在档位里了，优先它；
+      // 只有 `strategy === "custom"`（没带名字）时才回落到 defaultPreset。
+      // 反过来会让卡片显示 builtin，实际却走 file1。
+      const activeTarget = targetOf(activeId);
       const activePresetValue = tierOf(activeId) === "custom"
-        ? (typeof cfg.defaultPreset === "string" && cfg.defaultPreset ? cfg.defaultPreset : targetOf(activeId))
+        ? (activeTarget !== "custom"
+            ? activeTarget
+            : (typeof cfg.defaultPreset === "string" && cfg.defaultPreset ? cfg.defaultPreset : activeTarget))
         : "";
       const isCustomValue = (value) => typeof value === "string" && (value === "custom" || value.startsWith("custom:"));
       const active = catalog.find((entry) => entry.id === activeId)
@@ -997,7 +1021,10 @@ window.__ModuleLoader__.load({
               const orphan = presetInfo && presetInfo.available === true && !known;
               const openDetail = presetDetail && presetDetail.id === preset;
               const openPrompt = strategyDetail && strategyDetail.id === "strategy:" + preset;
-              const value = entryOf(preset).strategy;
+              // 对象形态的 preset 要折回值里：`{ strategy:"custom", preset:"builtin:x" }`
+              // 的第二级下拉必须显示 builtin:x，否则会显示成"贴入的文本"。
+              const mapping = entryOf(preset);
+              const value = mapping.strategy === "custom" && mapping.preset ? mapping.preset : mapping.strategy;
               return h("div", { key: preset, style: mappingRow },
                 h("div", { style: { minWidth: 0 } },
                   h("div", { style: { ...monoLabel } }, preset),

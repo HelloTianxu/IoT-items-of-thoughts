@@ -179,6 +179,8 @@ sessions: {
 "advisor": {
   "route": { "provider": "strong-provider", "model": "strong-model" },
   "effort": "auto",
+  "wait": true,
+  "maxTokens": 1200,
   "maxAdvice": 3,
   "maxChars": 600,
   "timeoutMs": 30000
@@ -196,6 +198,9 @@ sessions: {
 - `guidance: null` = 跟随全局；
 - 只写 `enabled` 时模式继承全局；
 - 清除档位不会清掉指导覆盖，除非显式传 `guidance: null`。
+
+**输出预算**：`advisor.maxTokens` 不配时按 `maxChars` 推算（中文约 2 token/字），
+避免固定预算把建议截成空正文。
 
 **可选建议（`advisor.wait: false`）**：压缩一完成就继续推理，建议没赶上就跳过
 （记 `advisor-skipped: not-ready`）。慢的指导模型不该拖住整个任务流程；默认 `true`（等待）。

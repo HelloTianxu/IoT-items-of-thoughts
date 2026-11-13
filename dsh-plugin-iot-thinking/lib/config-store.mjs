@@ -27,6 +27,8 @@ import { builtinPresetById } from "./builtin-presets.mjs";
 
 export const DEFAULTS = Object.freeze({
   enabled: true,
+  /** 是否记录每次调用的原始 chunk 形状（不含正文）；false = 完全不记。 */
+  debugChunks: true,
   // 默认保持旧 IoT 行为：8 标签全量。
   strategy: DEFAULT_STRATEGY,
   /** 逐策略限制覆盖；键是策略 id。 */
@@ -144,12 +146,17 @@ function strategyMap(value) {
   for (const [key, entry] of Object.entries(value)) {
     if (typeof key !== "string" || !key) continue;
     const normalized = normalizeRouteEntry(entry);
-    if (!normalized) continue;
     // 会话级指导覆盖：对象形态 `{ ..., guidance: { enabled, mode } }`。
     // `null` 表示"跟随全局"，必须原样保留，不能当成没配。
     const sessionGuidance = entry && typeof entry === "object" && !Array.isArray(entry) && "guidance" in entry
       ? sessionGuidanceValue(entry.guidance)
       : undefined;
+    // 只有 guidance、没有档位的条目也是合法的（"这个会话只关建议，档位跟随默认"）。
+    // 之前 normalizeRouteEntry 返回 null 就把整条丢了，指导覆盖在下次 load 时消失。
+    if (!normalized) {
+      if (sessionGuidance !== undefined) out[key] = { guidance: sessionGuidance };
+      continue;
+    }
     const withGuidance = (base) => (sessionGuidance === undefined
       ? base
       : { ...(typeof base === "object" ? base : { strategy: base }), guidance: sessionGuidance });
@@ -179,11 +186,18 @@ function sessionGuidanceValue(value) {
   return Object.keys(out).length ? out : undefined;
 }
 
-/** 指导开关与模式：旧 `advisor.enabled` 折进 `guidance.enabled`，避免两份开关互相打架。 */
-function guidanceConfig(value, advisor) {
+/**
+ * 指导开关与模式。
+ *
+ * 这里最容易出错的是"显式配置"与"默认值"的区分：merge 以 DEFAULTS 为底，
+ * `guidance.enabled=false` 恒是 boolean，如果只看 `typeof raw.enabled`，
+ * 旧配置里的 `advisor.enabled: true` 永远不会被折叠进来（迁移成了死代码）。
+ * 所以由调用方明确告知：文件里到底有没有写过 guidance。
+ */
+function guidanceConfig(value, advisor, explicit) {
   const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const legacyOn = advisor?.enabled === true;
-  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : legacyOn;
+  const enabled = explicit && typeof raw.enabled === "boolean" ? raw.enabled : legacyOn;
   const mode = raw.mode === "builtin" ? "builtin" : raw.mode === "external" ? "external" : "external";
   return { enabled, mode };
 }
@@ -260,6 +274,9 @@ function rewriteConfig(value) {
 function merge(base, overlay) {
   const out = { ...base };
   if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return out;
+  // 文件里是否**真的**写过 guidance：决定旧 advisor.enabled 要不要折叠，
+  // 以及 iot-guided 档位要不要按档位推断内置建议。
+  const guidanceExplicit = overlay.guidance !== undefined && overlay.guidance !== null;
   for (const key of Object.keys(DEFAULTS)) {
     if (overlay[key] !== undefined) out[key] = overlay[key];
   }
@@ -268,8 +285,15 @@ function merge(base, overlay) {
   out.sessions = strategyMap(out.sessions);
   out.rewrite = rewriteConfig(out.rewrite);
   out.advisor = advisorConfig(out.advisor);
-  out.guidance = guidanceConfig(out.guidance, out.advisor);
+  out.guidance = guidanceConfig(out.guidance, out.advisor, guidanceExplicit);
   out.builtinOverrides = builtinOverridesMap(out.builtinOverrides);
+  // 非持久标记：只活在内存里，save 落盘前会删掉。
+  Object.defineProperty(out, "__guidanceExplicit", {
+    value: guidanceExplicit,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
   return out;
 }
 
