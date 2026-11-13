@@ -1038,7 +1038,7 @@ window.__ModuleLoader__.load({
                 }),
                 h("span", { style: { fontSize: 12.5, fontWeight: 600, color: "inherit" } }, "教师增强（模型主动咨询）")
               ),
-              h("span", { style: hint }, advisorCfg.teacher.enabled ? "已启用 · 状态行会注入思考" : "默认关闭")
+              h("span", { style: hint }, advisorCfg.teacher.enabled ? "已启用 · 用法与 CD 状态进入运行时上下文" : "默认关闭")
             ),
             h("div", { style: { ...hint, marginTop: 4 } },
               "开启后模型可以调用 iot_consult_teacher：插件按它要求的轮次抽取会话正文，交给更强的模型做一次限时咨询。",

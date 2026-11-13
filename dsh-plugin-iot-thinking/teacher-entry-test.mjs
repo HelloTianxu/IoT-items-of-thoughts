@@ -75,7 +75,9 @@ const ctx = {
   get: () => undefined,
   on: (name, handler) => { assert.equal(name, "llm/stream"); streamHook = handler; },
   effect: (fn) => fn(),
-  inject: (_deps, fn) => fn({ tools: { register: (definition, options) => { assert.equal(options?.when, undefined, "tool list must not depend on session switches"); registrations++; tool = definition; return () => {}; } } }),
+  // This fixture intentionally lacks systemPrompt, as a headless host may.
+  // Actual registration/assembly/refresh is exercised by host-context-test.mjs.
+  inject: (deps, fn) => deps.includes("systemPrompt") ? undefined : fn({ tools: { register: (definition, options) => { assert.equal(options?.when, undefined, "tool list must not depend on session switches"); registrations++; tool = definition; return () => {}; } } }),
   llm: { stream: async function* (options) {
     calls.push(options);
     if (mode === "success") { yield { type: "text-delta", text: "local teacher answer" }; return; }

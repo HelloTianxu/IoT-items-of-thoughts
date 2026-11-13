@@ -121,7 +121,7 @@ function strictCreateUserMessage(input) {
 
 const source = () => chunks([start(), delta("abcde"), delta("fghij"), end("abcdefghij"), textDelta("hello"), finish()]);
 
-await check("教师状态行穿过 stream：显示真实深度，咨询后冷却按块递减", async () => {
+await check("教师状态不写入 thinking，冷却仍按块递减到恢复", async () => {
   resetTeacherState();
   const teacher = { enabled: true, depthRange: [1, 5], cooldownBlocks: 3 };
   const options = { ...baseOptions, sessionId: "stream-teacher" };
@@ -134,18 +134,13 @@ await check("教师状态行穿过 stream：显示真实深度，咨询后冷却
     ));
     return out.find((chunk) => chunk.type === "block-end")?.block?.text ?? "";
   };
-  const first = await run();
-  assert.ok(first.includes("[教师] 可用"), "首块应显示可用");
-  assert.ok(first.includes("深度 1-5"), "深度必须是真实范围，不是 undefined：" + first);
-  assert.ok(!first.includes("undefined"), "不能出现 undefined");
-  // 模拟一次咨询成功后进入冷却。
+  assert.equal(await run(), "· X", "thinking must not receive teacher state");
   markConsulted("stream-teacher", { cooldownBlocks: 3 });
-  const cooling = await run();
-  assert.ok(cooling.includes("[教师] 冷却中"), "咨询后应显示冷却");
-  assert.ok(cooling.includes("还需 3 块"), "刚咨询后是 3 块：" + cooling);
-  // 再跑一块，应该递减到 2。
-  const next = await run();
-  assert.ok(next.includes("还需 2 块"), "块推进要递减：" + next);
+  for (const remaining of [2, 1, 0]) {
+    assert.equal(await run(), "· X");
+    assert.equal(teacherStatus("stream-teacher").remainingBlocks, remaining);
+  }
+  assert.equal(canConsult("stream-teacher"), true);
   resetTeacherState();
 });
 

@@ -251,7 +251,7 @@ sessions: {
 按块自动触发建议有个根本问题：**重要性是任务状态，不是文本特征**。长会话里 `[决定]`/`[风险]`
 早就出现过，规则会误触发；用户回一句「继续」也不是新需求。所以时机判断交给**正在做这件事的模型**。
 
-开启后插件注册一个工具：
+插件注册一个声明稳定的工具；会话开关在执行入口生效：
 
 ```
 iot_consult_teacher(depth, ask, goal, progress)
@@ -264,8 +264,22 @@ iot_consult_teacher(depth, ask, goal, progress)
 **插件负责的三件事**（这是它比"用户直接调强模型"可靠的原因）：
 
 1. **系统提示词骨架固定**——角色、边界、输出纪律由插件写死，模型只能填槽位；
-2. **上下文由插件组织**——只取用户消息与助手结论正文，按 `inputBudget` 裁剪，工具细节与思考过程只留摘要；
-3. **冷却闸门（CD）**——调用后进入冷却，冷却状态以 `[教师] 可用 / [教师] 冷却中 · 还需 N 块` 注入思考。
+2. **上下文由插件组织**——只取用户消息与助手结论正文，按 `inputBudget` 裁剪，不发送推理块或工具调用块；
+3. **冷却闸门（CD）**——成功返回后进入冷却；状态通过 `iot-thinking.teacher` 运行时上下文快照提供，不再写入 thinking。
+
+**新 Session 如何使用**：实际工具声明提供用途、参数类型、`ask` 枚举与返回说明，
+不依赖旧会话历史，也不需要先加载单独 Skill。开启会话另获不超过 180 字的运行时上下文，
+说明外援用途、参数入口和当前可用/CD 状态。它是宿主的 user-role 动态上下文，不是 system-role 段。
+未启用、缺会话身份、或宿主抑制可选运行时上下文时不注入；工具仍由宿主工具过滤策略决定是否可见。
+
+最小调用示例（depth 以该会话公布范围为准）：
+
+```json
+{"ask":"review","depth":3,"goal":"检查迁移方案","progress":"已完成设计，尚未执行"}
+```
+
+注入文本使用 `interpolate:false`；上下文回调不调用模型、不遍历历史。
+读取配置异常时不阻断组装，错误诊断每次注册最多记录一次。
 
 CD 按**块**计量，只暴露冷却、不暴露总额（避免"不用白不用"的心理）。失败与超时**不进**冷却——
 一次没生效的咨询不该让模型付出代价。
@@ -307,7 +321,7 @@ CD 按**块**计量，只暴露冷却、不暴露总额（避免"不用白不用
 不会把主任务挂死。
 
 事件：`teacher-tool-registered` / `teacher-consulted` / `teacher-failed` /
-`teacher-status-appended`。
+`teacher-context-error`。
 
 ⚠️ 指导模型与工作模型相同（或同源）时收益有限；要发挥"老师"作用，应指向一个**不同的、更强的**模型。
 
@@ -531,3 +545,16 @@ $env:IOT_DSH_SEAM_ANCHORS = "<DSH_HOME>/dsh-<ver>/node_modules"
    只有 stderr 一行 `warning: 1 entry did not activate`，账本里没有 `constructed`。
 9. **装完先看账本，别信"装上了"**：只有 `events.jsonl` 里出现 `constructed`，
    才说明这条 entry 真的激活了。
+
+### 教师回归测试
+
+默认 `npm test` 包含 selftest、教师入口、上下文纯逻辑和 smoke，任一失败立即停止。
+真实宿主契约测试必须另用当前安装的 Electron runtime（可读 ASAR）执行：
+
+```sh
+ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" host-context-test.mjs --expect-context
+```
+
+它使用真实 Cordis、SystemPrompt、Tools 和 NativeToolExecutor，验证新会话可见的参数 schema、
+上下文注册/组装/渲染/刷新、会话覆盖、总闸、宿主 suppression、CD 和卸载。
+所有配置和账本在临时目录，LLM 为离线替身，不访问模型。它不等价于完整线上 AgentLoop 验收。

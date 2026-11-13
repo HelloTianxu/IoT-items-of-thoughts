@@ -44,7 +44,8 @@
   },
   "license": "MIT",
   "scripts": {
-    "test": "node selftest.mjs && node smoke.mjs",
+    "test": "node selftest.mjs && node --experimental-vm-modules teacher-entry-test.mjs && node teacher-context-test.mjs && node smoke.mjs",
+    "test:host-context": "node host-context-test.mjs --expect-context",
     "test:teacher": "node --experimental-vm-modules teacher-entry-test.mjs",
     "smoke": "node smoke.mjs"
   }

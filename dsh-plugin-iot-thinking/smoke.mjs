@@ -163,7 +163,7 @@ const ctx = {
   get: (name) => (name === "webServer" ? webServer : undefined),
   effect: () => {},
   // 真的执行回调：教师工具的注册路径必须被走到，否则"注册了但没人调"测不出来。
-  inject: (_names, factory) => factory({
+  inject: (names, factory) => Array.isArray(names) && names.includes("systemPrompt") ? undefined : factory({
     // 回调拿到的是"子 fiber"上下文：这里给足插件实际会用到的两样东西。
     get: (name) => (name === "webServer" ? webServer : undefined),
     tools: {

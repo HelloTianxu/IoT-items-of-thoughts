@@ -11,6 +11,7 @@ import { archiveOriginal, mark } from "./lib/ledger.mjs";
 import { resolveConfig } from "./lib/route.mjs";
 import { switchSessionStrategy } from "./lib/switch.mjs";
 import { transformStream } from "./lib/stream.mjs";
+import { registerTeacherContext } from "./lib/teacher-prompt.mjs";
 import {
   ASK_KINDS,
   TEACHER_LIMITS,
@@ -149,7 +150,9 @@ export function apply(ctx, config = {}) {
     const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
     return { cfg, sessionId, resolved, teacher: resolved.teacher ?? {}, enabled: cfg.enabled !== false && resolved.teacher?.enabled === true };
   };
-  // 与 stream.mjs 的状态行共用同一份归一化：两处各写一遍必然分叉。
+  registerTeacherContext(ctx, teacherConfigFor, error =>
+    mark("teacher-context-error", { message: String(error?.message ?? error) }));
+  // Tool execution and runtime context share the same effective configuration.
   const teacherLimits = (teacherCfg) => normalizeTeacherLimits(teacherCfg);
   const teacherTool = () => {
     return defineTool({
@@ -158,13 +161,13 @@ export function apply(ctx, config = {}) {
         "请一位更强的模型（教师）就当前任务给一次限时咨询。",
         "何时调用由你判断：方案定型前、准备执行不可逆动作前、宣布完成前，或你确实卡住时。",
         "插件会按 depth 从本会话里抽取最近几轮正文作为背景；你只需说明需求与进展。",
-        "咨询后进入冷却，冷却状态会出现在你的思考里（[教师] 行）。",
+        "返回咨询正文，供你判断采纳，不替你执行任务。成功后按思考块冷却；未启用或冷却中会本地拒绝，失败时继续自行判断。",
       ].join(" "),
       parameters: {
         depth: {
           type: "number",
           required: true,
-          description: "要几轮历史上下文（1-5）。越大越贵，通常 2-3 足够。",
+          description: "要几轮本会话历史正文，填写 1-5 的整数；以外援运行时上下文公布的深度范围为准。插件取正文，不需要你复制历史。",
         },
         ask: {
           type: "string",
