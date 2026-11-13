@@ -127,6 +127,7 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
   timer.unref?.();
 
   const assembler = new Llm.BlockAssembler();
+  let usage = null;
   try {
     const stream = ctx.llm.stream({
       provider: route.provider,
@@ -137,7 +138,10 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
       purpose: "compaction",
       ...(signal === undefined ? {} : { signal }),
     });
-    for await (const chunk of stream) assembler.push(chunk);
+    for await (const chunk of stream) {
+      if (chunk?.type === "usage") usage = chunk?.usage ?? chunk;
+      assembler.push(chunk);
+    }
   } catch (error) {
     clearTimeout(timer);
     onEvent?.("advisor-failed", {
@@ -159,12 +163,37 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
     onEvent?.("advisor-failed", { provider: route.provider, model: route.model, message: finish.failure?.message ?? "unknown", code: finish.failure?.code });
     return null;
   }
+  // 只取正文块：指导模型常常是思考模型，reasoning 块必须排除，
+  // 否则建议里会混进它的内心独白。
   const raw = assembler
     .blocks()
     .filter((block) => block && block.type === "text" && typeof block.text === "string")
     .map((block) => block.text)
     .join("\n");
-  return raw.trim() ? raw : null;
+  const reasoningTokens = Number(usage?.completion_tokens_details?.reasoning_tokens ?? usage?.reasoning_tokens);
+  const completionTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
+  onEvent?.("advisor-usage", {
+    provider: route.provider,
+    model: route.model,
+    finish: finish?.kind ?? null,
+    truncated: finish?.kind === "max-tokens",
+    charsOut: raw.trim().length,
+    ...(Number.isFinite(completionTokens) ? { completionTokens } : {}),
+    ...(Number.isFinite(reasoningTokens) ? { reasoningTokens } : {}),
+    ...(Number.isFinite(completionTokens) && completionTokens > 0 && Number.isFinite(reasoningTokens)
+      ? { reasoningShare: Number((reasoningTokens / completionTokens).toFixed(2)) }
+      : {}),
+  });
+  if (!raw.trim()) {
+    // 正文为空有两种：被截断（预算全花在思考上），或模型只想不说。
+    onEvent?.("advisor-skipped", {
+      provider: route.provider,
+      model: route.model,
+      reason: finish?.kind === "max-tokens" ? "truncated-no-text" : "empty-text",
+    });
+    return null;
+  }
+  return raw;
 }
 
 /**

@@ -42,7 +42,7 @@ import { mark } from "./lib/ledger.mjs";
 import { ConfigStore } from "./lib/config-store.mjs";
 import { hasLabel } from "./lib/gates.mjs";
 import { outputDiscipline } from "./lib/think.mjs";
-import { ADVISOR_LABEL, appendAdvice, buildAdvisorPrompt, formatAdvice, resolveAdvisorRoute } from "./lib/advisor.mjs";
+import { ADVISOR_LABEL, advise, appendAdvice, buildAdvisorPrompt, formatAdvice, resolveAdvisorRoute } from "./lib/advisor.mjs";
 import { builtinPresetText } from "./lib/builtin-presets.mjs";
 import { BUILTIN_PRESETS, builtinPresetById, builtinPresetCatalog } from "./lib/builtin-presets.mjs";
 import { migrateLegacyConfig, migrateRewriteConfig, resolveConfig, resolveRewriteRoute, resolveRoute, strategyCatalog } from "./lib/route.mjs";
@@ -1888,6 +1888,49 @@ await check("指导层：调用失败不影响压缩结果", async () => {
   const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2) });
   assert.equal(result.text, "[决定] 甲。", "指导失败时主体原样保留");
   assert.equal(result.advice ?? null, null);
+});
+
+await check("指导调用只取正文：思考模型的 reasoning 块不混进建议", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: () => chunks([
+        { type: "reasoning-delta", index: 0, text: "我先想想他到底要什么……" },
+        { type: "text-delta", index: 0, text: "[指导] 先补替换闸门的测试。" },
+        { type: "finish", reason: { kind: "stop" } },
+        { type: "usage", usage: { completion_tokens: 300, completion_tokens_details: { reasoning_tokens: 240 } } },
+      ]),
+    },
+  };
+  const raw = await advise({
+    ctx,
+    Llm: fakeLlm(),
+    route: { provider: "p", model: "m" },
+    prompt: "评审",
+    options: {},
+    timeoutMs: 5000,
+    onEvent: (event, fields) => events.push({ event, ...fields }),
+  });
+  assert.equal(raw, "[指导] 先补替换闸门的测试。", "只取正文块");
+  assert.ok(!raw.includes("我先想想"), "内心独白不能混进来");
+  const usageEvent = events.find((entry) => entry.event === "advisor-usage");
+  assert.equal(usageEvent.reasoningTokens, 240);
+  assert.equal(usageEvent.reasoningShare, 0.8);
+});
+
+await check("指导调用正文为空：区分截断与只想不说，都返回 null", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: () => chunks([
+        { type: "reasoning-delta", index: 0, text: "想了很久但没写正文。" },
+        { type: "finish", reason: { kind: "max-tokens" } },
+      ]),
+    },
+  };
+  const raw = await advise({ ctx, Llm: fakeLlm(), route: { provider: "p", model: "m" }, prompt: "评审", options: {}, timeoutMs: 5000, onEvent: (event, fields) => events.push({ event, ...fields }) });
+  assert.equal(raw, null);
+  assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "truncated-no-text"));
 });
 
 await check("指导格式：只保留带标签的可执行建议，去重并限条数", () => {

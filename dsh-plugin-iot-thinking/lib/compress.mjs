@@ -451,10 +451,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       timeoutMs,
       onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
     }).then((raw) => {
-      if (!raw) {
-        mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-output" });
-        return null;
-      }
+      // 空输出/截断的原因已经由 advise 自己记账（advisor-skipped），这里不再重复。
+      if (!raw) return null;
       const advice = formatAdvice(raw, advisorCfg);
       if (!advice) {
         mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-usable-line" });
