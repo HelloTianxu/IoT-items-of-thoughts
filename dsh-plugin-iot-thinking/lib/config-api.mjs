@@ -13,6 +13,7 @@ import { strategyById, strategyIds } from "./strategies.mjs";
 import { normalizeRouteEntry, resolveConfig, resolveRewriteRoute, strategyCatalog } from "./route.mjs";
 import { listPresets, readPreset, writePreset } from "./custom.mjs";
 import { builtinPresetCatalog, builtinPresetById } from "./builtin-presets.mjs";
+import { appendAdvice } from "./advisor.mjs";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -1241,6 +1242,10 @@ function doRegister(ctx, ws, store, deps = {}) {
         : null;
     const candidate = typeof result === "string" ? result : result?.text;
     const text = typeof candidate === "string" ? candidate.trim() : "";
+    // 指导是替换判定之后才追加的：判定用主体，展示用"主体 + 指导"。
+    // 之前这里把 advice 丢了，所以"开了外部指导但测试看不到指导"。
+    const advice = typeof result === "string" ? null : result?.advice ?? null;
+    const displayText = advice ? appendAdvice(text, advice) : text;
     // The same rule stream.mjs applies before it may substitute a block.
     const accepted = strategy.accepts(input, candidate, cfg.limits);
     const reason = accepted
@@ -1260,8 +1265,10 @@ function doRegister(ctx, ws, store, deps = {}) {
       routeSource: route.source,
       offloaded: route.source !== "session",
       charsIn: input.length,
-      charsOut: text.length,
-      text: text || null,
+      charsOut: displayText.length,
+      text: displayText || null,
+      advice: advice || null,
+      charsOutBody: text.length,
       effort: result?.event?.effort ?? null,
       effortFallback: result?.event?.effortFallback === true,
       minChars,

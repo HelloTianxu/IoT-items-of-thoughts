@@ -1546,6 +1546,16 @@ window.__ModuleLoader__.load({
                   + (test.routeSource ? "（来源 " + test.routeSource + "）" : "")
                   + (test.offloaded ? " · 已卸载到该路由" : ""))
             : null,
+          test.guidance
+            ? h("div", { style: { ...hint, marginTop: 4 } },
+                "本次指导：" + (test.guidance.enabled ? (test.guidance.mode === "builtin" ? "内置（压缩器输出 [指导]）" : "外部（并发调用强模型）") : "关闭"))
+            : null,
+          test.advice
+            ? h("div", { style: { marginTop: 8 } },
+                h("div", { style: { fontSize: 12, fontWeight: 600, color: "#2f6fed" } }, "外部指导输出："),
+                h("div", { style: { ...monoBlock, marginTop: 4, maxHeight: 220, overflow: "auto", background: "rgba(47,111,237,0.08)", padding: 8, borderRadius: 6 } }, String(test.advice))
+              )
+            : null,
           test.text ? h("div", { style: { ...monoBlock, marginTop: 6, maxHeight: 220, overflow: "auto", background: "rgba(127,127,127,0.08)", padding: 8, borderRadius: 6 } }, String(test.text)) : null,
           Array.isArray(test.trace) && test.trace.length
             ? h("div", { style: { marginTop: 10 } },

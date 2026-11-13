@@ -2817,6 +2817,29 @@ await check("session API：指导覆盖与档位分开落盘，清除档位不�
   assert.equal(gone.payload.override, null);
 });
 
+await check("自测路由：外部指导的输出要回传并合并进展示文本", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-test-advice-")), "config.json"));
+  store.save({ strategy: "iot-full", rewrite: { provider: "p", model: "m" }, guidance: { enabled: true, mode: "external" } });
+  registerConfigApi(testCtx(ws), store, {
+    rewrite: async () => ({
+      text: "[决定] 甲。",
+      event: { strategy: "iot-full", finish: "stop" },
+      advice: "[指导] 先补替换闸门的测试。",
+    }),
+    getRoute: () => ({ provider: "p", model: "m" }),
+  });
+
+  const res = await ws.call("/iot-thinking/api/test", {
+    method: "POST",
+    body: JSON.stringify({ strategy: "iot-full", text: DRAFT.repeat(3) }),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.advice, "[指导] 先补替换闸门的测试。", "指导要单独回传");
+  assert.ok(res.payload.text.includes("[指导]"), "展示文本要包含指导");
+  assert.equal(res.payload.charsOutBody, "[决定] 甲。".length, "主体字数单独给出");
+});
+
 await check("自测路由：返回报文 trace 与本次指导模式，便于 Log 窗口比对", async () => {
   const ws = fakeWebServer();
   const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-test-trace-")), "config.json"));
