@@ -301,6 +301,27 @@ function sanitize(payload) {
     else if (entry?.id === "custom" && entry.custom) next.defaultPreset = `custom:${entry.custom}`;
     else if (raw === "custom") next.defaultPreset = "custom";
   }
+  // 指导层：开关、路由、超时与条数上限。route 留空 = 跟随压缩器路由。
+  if (payload.advisor !== undefined) {
+    const raw = payload.advisor && typeof payload.advisor === "object" && !Array.isArray(payload.advisor) ? payload.advisor : {};
+    const out = {};
+    if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+    if (raw.route !== undefined) {
+      const route = raw.route && typeof raw.route === "object" && !Array.isArray(raw.route) ? raw.route : {};
+      const pick = (value) => (value === null ? null : typeof value === "string" ? value.trim() || null : undefined);
+      const provider = pick(route.provider);
+      const model = pick(route.model);
+      const nextRoute = {};
+      if (provider !== undefined) nextRoute.provider = provider;
+      if (model !== undefined) nextRoute.model = model;
+      if (Object.keys(nextRoute).length) out.route = nextRoute;
+    }
+    for (const key of ["timeoutMs", "maxAdvice", "maxChars"]) {
+      if (Number.isFinite(raw[key])) out[key] = Math.floor(raw[key]);
+    }
+    if (typeof raw.goal === "string") out.goal = raw.goal.slice(0, 400);
+    next.advisor = out;
+  }
   // 改写器路由（算力卸载）：新形状是 `rewrite` 块；旧卡片发的顶层
   // provider/model/reasoningEffort 折进同一个块，行为不变。
   if (payload.rewrite !== undefined) {

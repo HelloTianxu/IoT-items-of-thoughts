@@ -42,6 +42,7 @@ import { mark } from "./lib/ledger.mjs";
 import { ConfigStore } from "./lib/config-store.mjs";
 import { hasLabel } from "./lib/gates.mjs";
 import { outputDiscipline } from "./lib/think.mjs";
+import { ADVISOR_LABEL, appendAdvice, buildAdvisorPrompt, formatAdvice, resolveAdvisorRoute } from "./lib/advisor.mjs";
 import { builtinPresetText } from "./lib/builtin-presets.mjs";
 import { BUILTIN_PRESETS, builtinPresetById, builtinPresetCatalog } from "./lib/builtin-presets.mjs";
 import { migrateLegacyConfig, migrateRewriteConfig, resolveConfig, resolveRewriteRoute, resolveRoute, strategyCatalog } from "./lib/route.mjs";
@@ -1793,6 +1794,99 @@ await check("内置预设可编辑：覆盖文本优先，恢复默认后回到�
   const prepared = strategyById("custom").prepare(resolved.limits);
   assert.equal(prepared.state.text, "我的压缩规则：只输出一行。");
   assert.equal(prepared.state.edited, true);
+});
+
+await check("指导层：关闭时不调用，开启时调用强模型并给出可注入的建议", async () => {
+  const calls = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ provider: options.provider, model: options.model });
+        // 压缩调用走弱模型，指导调用走强模型。
+        const text = options.model === "strong"
+          ? "[指导] 下一步先把替换闸门的判定顺序写成测试，再动 UI。\n\n[指导] 别在块结束路径上做同步等待。"
+          : "[决定] 先做替换闸门。\n\n[计划] 补测试。";
+        return chunks([{ type: "text-delta", index: 0, text }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const cfg = {
+    strategy: "custom",
+    rewrite: { provider: "weak", model: "weak", fallback: "keep" },
+    advisor: { enabled: true, route: { provider: "strong", model: "strong" }, maxAdvice: 3, maxChars: 600 },
+    limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" },
+  };
+  const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak", sessionId: "s" } });
+  assert.ok(result, "压缩结果要保留");
+  assert.equal(result.text, "[决定] 先做替换闸门。\n\n[计划] 补测试。", "主体不含指导");
+  assert.ok(result.advice.includes("[指导]"), "指导单独返回");
+  assert.equal(calls.length, 2, "压缩一次 + 指导一次");
+  assert.equal(calls[1].model, "strong", "指导走配置的强模型");
+});
+
+await check("指导层：关闭时不多打一次模型", async () => {
+  const calls = [];
+  const ctx = { llm: { stream: (options) => { calls.push(options.model); return chunks([{ type: "text-delta", index: 0, text: "[决定] 甲。" }, { type: "finish", reason: { kind: "stop" } }]); } } };
+  const cfg = {
+    strategy: "custom",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { enabled: false },
+    limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" },
+  };
+  await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak" } });
+  assert.equal(calls.length, 1);
+});
+
+await check("指导层：调用失败不影响压缩结果", async () => {
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        if (options.model === "strong") {
+          return (async function* () { throw Object.assign(new Error("boom"), { code: "TRANSPORT" }); })();
+        }
+        return chunks([{ type: "text-delta", index: 0, text: "[决定] 甲。" }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const cfg = {
+    strategy: "custom",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { enabled: true, route: { provider: "strong", model: "strong" } },
+    limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" },
+  };
+  const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak" } });
+  assert.equal(result.text, "[决定] 甲。", "指导失败时主体原样保留");
+  assert.equal(result.advice ?? null, null);
+});
+
+await check("指导格式：只保留带标签的可执行建议，去重并限条数", () => {
+  const raw = "可以考虑一下。\n指导：先补测试。\n[指导] 先补测试。\n【指导】把同步等待改成异步。\n[指导] 太短";
+  const out = formatAdvice(raw, { maxAdvice: 2, maxChars: 600 });
+  assert.ok(out.startsWith("[指导] 先补测试。"));
+  assert.ok(out.includes("[指导] 把同步等待改成异步。"));
+  assert.equal(out.split("\n\n").length, 2, "重复项被去掉，且不超过 2 条");
+  assert.ok(!out.includes("可以考虑一下"), "没有标签的行不算建议");
+  assert.equal(appendAdvice("主体", out), `主体\n\n${out}`);
+  assert.equal(appendAdvice("主体", ""), "主体");
+});
+
+await check("指导路由：未配 route 时跟随压缩器路由，未启用返回 null", () => {
+  assert.equal(resolveAdvisorRoute({ advisor: { enabled: false } }, "custom", null), null);
+  const follow = resolveAdvisorRoute({ advisor: { enabled: true }, rewrite: { provider: "p", model: "m" } }, "custom", { provider: "s", model: "s" });
+  assert.equal(follow.provider, "p");
+  assert.equal(follow.source, "rewrite");
+  const own = resolveAdvisorRoute({ advisor: { enabled: true, route: { provider: "strong", model: "strong" } }, rewrite: { provider: "p", model: "m" } }, "custom", { provider: "p", model: "m" });
+  assert.equal(own.model, "strong");
+  assert.equal(own.offloaded, true, "与压缩路由不同就算卸载");
+});
+
+await check("指导提示词：把目标、骨架、最近结果都带上，并要求可执行", () => {
+  const prompt = buildAdvisorPrompt({ nodes: "[决定] 甲", goal: "把插件做稳", recent: ["跑了 selftest", "失败 2 项"], limits: { maxAdvice: 2, maxChars: 300 } });
+  assert.ok(prompt.includes("把插件做稳"));
+  assert.ok(prompt.includes("[决定] 甲"));
+  assert.ok(prompt.includes("跑了 selftest"));
+  assert.ok(prompt.includes("最多 2 条"));
+  assert.ok(prompt.includes("不要复述"));
 });
 
 await check("无标签输出：判 no-label 并重试一次，两次都无标签就保留原文", async () => {

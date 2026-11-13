@@ -4,6 +4,7 @@
 // 不 import dsh，自测可以用假 source 直接驱动。
 
 import { DEFAULT_STRATEGY, isShorterReplacement, strategyById } from "./strategies.mjs";
+import { appendAdvice } from "./advisor.mjs";
 
 export { isShorterReplacement };
 
@@ -102,6 +103,8 @@ export async function* transformStream(source, options, deps) {
     // transformer stays testable with a trivial rewriter.
     const candidate = typeof rewritten === "string" ? rewritten : rewritten?.text;
     const candidateEvent = typeof rewritten === "string" ? null : rewritten?.event ?? null;
+    // 指导只在替换判定**之后**追加：它不能把候选撑长，否则 shorter 档位会拒掉。
+    const advice = typeof rewritten === "string" ? null : rewritten?.advice ?? null;
     // 判定要带上 limits：自定义预设的替换规则（shorter / different）是配置出来的，
     // 不在策略常量里。
     const accepted = strategy.accepts(original, candidate, cfg.limits);
@@ -129,7 +132,9 @@ export async function* transformStream(source, options, deps) {
       return false;
     }
 
-    const text = candidate.trim();
+    const body = candidate.trim();
+    const text = appendAdvice(body, advice);
+    if (advice) emit("advisor-appended", { index, adviceLines: String(advice).split("\n\n").length, charsAdded: text.length - body.length });
     yield { type: "reasoning-delta", index, text };
     yield { ...block, type: "block-end", index, block: { ...block.block, text } };
     buffers.delete(index);

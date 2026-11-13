@@ -156,6 +156,36 @@ sessions: {
 - 旧形态 `"custom:名字"` 字符串仍读得懂；新写入统一成对象形态。
 - 未知内置名会被拒绝（400），不会静默落盘。
 
+### 指导层（外部评审）
+
+压缩之后，可以让另一个（通常更强的）模型看一遍推理骨架，给出下一步建议。
+它只读几百字的骨架与最近几个动作结果，不读完整上下文 —— 比"把整段对话喂给强模型"
+便宜一个数量级，同时保住了强模型对方向的判断力。
+
+```jsonc
+"advisor": {
+  "enabled": true,
+  "route": { "provider": "strong-provider", "model": "strong-model" },
+  "maxAdvice": 3,
+  "maxChars": 600,
+  "timeoutMs": 30000
+}
+```
+
+- **与压缩档位正交**：压缩是减 token，指导是加信息。两者独立开关，不要把"增强"
+  做成第四档 —— 那会让"想少留一点但又要指导"没法表达。
+- **只在压缩成功后调用**：压缩失败时没有骨架可看。
+- **独立超时、失败不阻塞**：指导是增强，不是必需；它挂了不影响这一块的压缩结果。
+- **不参与节点预算**：建议追加在压缩结果末尾，用 `[指导]` 标签隔开，不会挤掉
+  `[决定]` 这类关键节点。
+- **建议要可执行**：提示词明确要求"不复述已有内容、没有值得说的就少说"，
+  格式闸门只留带标签且不重复的行。
+
+事件：`advisor-called` / `advisor-ready` / `advisor-injected` / `advisor-skipped` / `advisor-failed`。
+
+⚠️ 指导模型与压缩模型相同（或同源）时收益有限，甚至只是自我确认；要发挥"老师"作用，
+应指向一个**不同的、更强的**模型。
+
 ### 压缩器路由（算力卸载）
 
 压缩调用的路由是三层解析：`strategies[<档位>]` > `rewrite` > 跟随当前请求。
@@ -307,6 +337,7 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 | `lib/route.mjs` | 档位三层解析、改写器路由解析（算力卸载）、内置预设解析、旧配置迁移、档位目录 |
 | `lib/custom.mjs` | 自定义预设：目录 / 列表 / 读（mtime 缓存）/ 另存为 / 提示词拼装 |
 | `lib/builtin-presets.mjs` | 内置预设（standard / deep）：正文、元数据、清单 |
+| `lib/advisor.mjs` | 指导层：路由解析、提示词、格式闸门、追加注入 |
 | `lib/gates.mjs` | 自定义预设的四道最小闸 |
 | `lib/switch.mjs` | `/iot` 的纯逻辑（与 HTTP 桥共用同一张 `sessions` 表） |
 | `lib/compress.mjs` | 通用改写引擎：模型调用、effort 恢复、按档位判定与重试、确定性兜底 |

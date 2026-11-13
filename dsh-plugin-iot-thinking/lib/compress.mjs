@@ -12,11 +12,13 @@ import {
 } from "./effort.mjs";
 import { DEFAULT_STRATEGY, limitsOf, strategyById } from "./strategies.mjs";
 import { hasLabel, hasThinkTag } from "./gates.mjs";
+import { ADVISOR_LIMITS, advise, appendAdvice, buildAdvisorPrompt, formatAdvice, resolveAdvisorRoute } from "./advisor.mjs";
 import { isOffloaded, normalizeRouteTarget, resolveRewriteRoute } from "./route.mjs";
 
 /** 改写结果 + 账本载荷。是否真的替换由 stream.mjs 判定后写进 replaced。 */
-function rewritten(text, payload) {
-  return { text, event: payload };
+function rewritten(text, payload, advice = null) {
+  // `advice` 单独带出来：主体先过替换判定，指导在替换之后再追加。
+  return { text, event: payload, ...(advice ? { advice } : {}) };
 }
 
 /** 目录查询只是建议，不能卡住响应；测试会调小它。 */
@@ -398,6 +400,67 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     ...fields,
   });
 
+  /**
+   * 指导层：压缩成功后，让另一个模型看一遍骨架并追加建议。
+   *
+   * 三条硬约束：① 只在压缩成功时调用（压缩失败时没有骨架可看）；
+   * ② 独立超时，失败一律返回原文（增强不能把主流程拖挂）；
+   * ③ 指导不参与节点预算，追加在末尾。
+   */
+  const maybeAdvise = async (nodes) => {
+    const advisorRoute = resolveAdvisorRoute(cfg, strategy.id, sessionRoute);
+    if (!advisorRoute) return { text: nodes, advice: null, event: null };
+    const advisorCfg = cfg.advisor ?? {};
+    const timeoutMs = Math.min(120000, Math.max(3000, Number(advisorCfg.timeoutMs) || 30000));
+    const prompt = buildAdvisorPrompt({
+      nodes,
+      goal: advisorCfg.goal ?? recent[0] ?? "",
+      recent,
+      limits: advisorCfg,
+    });
+    mark("advisor-called", {
+      index,
+      strategy: strategy.id,
+      provider: advisorRoute.provider,
+      model: advisorRoute.model,
+      source: advisorRoute.source,
+      offloaded: advisorRoute.offloaded,
+    });
+    const raw = await advise({
+      ctx,
+      Llm,
+      route: advisorRoute,
+      prompt,
+      options,
+      timeoutMs,
+      onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
+    });
+    if (!raw) {
+      mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-output" });
+      return { text: nodes, advice: null, event: null };
+    }
+    const advice = formatAdvice(raw, advisorCfg);
+    if (!advice) {
+      mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-usable-line" });
+      return { text: nodes, advice: null, event: null };
+    }
+    const lines = advice.split("\n\n").length;
+    mark("advisor-ready", {
+      index,
+      strategy: strategy.id,
+      provider: advisorRoute.provider,
+      model: advisorRoute.model,
+      adviceLines: lines,
+      charsOut: advice.length,
+    });
+    // 主体仍是压缩结果；指导单独带出，由 stream 在替换判定之后追加。
+    return {
+      text: nodes,
+      advice,
+      event: { provider: advisorRoute.provider, model: advisorRoute.model, offloaded: advisorRoute.offloaded, lines },
+    };
+  };
+
   const finishFields = (finish, fields) => ({
     finish: finish?.kind,
     truncated: finish?.kind === "max-tokens",
@@ -507,9 +570,17 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     if (verdict.ok) {
       // 防御：档位没回 text 时（自定义预设早期版本就这样）退回原始输出，不在这里抛。
       const out = typeof verdict.text === "string" ? verdict.text : String(result.output ?? "").trim();
+      const advised = await maybeAdvise(out);
+      // 指导与主体分开返回：stream 要先按"主体"做替换判定（必须更短），
+      // 通过之后再追加指导 —— 否则指导会把候选撑长，shorter 档位直接拒掉。
       return {
         done: true,
-        value: rewritten(out, payload(finishFields(result.finish, { charsOut: out.length, retried: strict, ...strategy.metrics?.(out) }))),
+        value: rewritten(advised.text, payload(finishFields(result.finish, {
+          charsOut: advised.text.length,
+          retried: strict,
+          ...strategy.metrics?.(out),
+          ...(advised.event ? { advisor: advised.event } : {}),
+        })), advised.advice),
       };
     }
     return { done: false, reason: verdict.reason ?? "rejected", detail: verdict.detail ?? null, finish: result.finish };

@@ -43,6 +43,18 @@ export const DEFAULTS = Object.freeze({
    */
   rewrite: { provider: null, model: null, effort: "auto", fallback: "keep" },
   /**
+   * 指导层：压缩之后让另一个模型看骨架并给建议。
+   * 与压缩档位正交 —— 压缩是减 token，指导是加信息。
+   */
+  advisor: {
+    enabled: false,
+    route: { provider: null, model: null },
+    timeoutMs: 30000,
+    maxAdvice: 3,
+    maxChars: 600,
+    goal: "",
+  },
+  /**
    * 全局默认的"自定义预设"：`builtin:<id>` / `custom:<文件名>` / `custom`（贴入的文本）。
    * 只在 custom 档位且没有会话/映射覆盖时使用；null = 沿用旧行为（贴入文本）。
    */
@@ -127,6 +139,28 @@ function strategyMap(value) {
   return out;
 }
 
+/** 指导层配置：开关、路由、超时与条数上限；非法值一律落回安全默认。 */
+function advisorConfig(value) {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const route = raw.route && typeof raw.route === "object" && !Array.isArray(raw.route) ? raw.route : {};
+  const provider = typeof route.provider === "string" && route.provider.trim() ? route.provider.trim() : null;
+  const model = typeof route.model === "string" && route.model.trim() ? route.model.trim() : null;
+  return {
+    enabled: raw.enabled === true,
+    route: { provider, model },
+    timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
+    maxAdvice: clampInt(raw.maxAdvice, 1, 3, 3),
+    maxChars: clampInt(raw.maxChars, 80, 600, 600),
+    goal: typeof raw.goal === "string" ? raw.goal.slice(0, 400) : "",
+  };
+}
+
+function clampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
 /** 内置预设覆盖：键必须是存在的内置 id，值是字符串；空串等于恢复默认（删键）。 */
 function builtinOverridesMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -179,6 +213,7 @@ function merge(base, overlay) {
   out.agentPresets = strategyMap(out.agentPresets);
   out.sessions = strategyMap(out.sessions);
   out.rewrite = rewriteConfig(out.rewrite);
+  out.advisor = advisorConfig(out.advisor);
   out.builtinOverrides = builtinOverridesMap(out.builtinOverrides);
   return out;
 }
@@ -229,6 +264,14 @@ export class ConfigStore {
     // 否则浅合并会把没提到的字段一起抹掉 —— 用户会看到"保存完 provider 没了"。
     if (current?.rewrite && typeof current.rewrite === "object" && next?.rewrite && typeof next.rewrite === "object") {
       overlay.rewrite = { ...current.rewrite, ...next.rewrite };
+    }
+    // advisor 同样有嵌套 route：增量改开关不能把已配的 provider/model 抹掉。
+    if (current?.advisor && typeof current.advisor === "object" && next?.advisor && typeof next.advisor === "object") {
+      overlay.advisor = {
+        ...current.advisor,
+        ...next.advisor,
+        route: { ...(current.advisor.route ?? {}), ...(next.advisor.route ?? {}) },
+      };
     }
     const merged = merge(this.rowDefaults, overlay);
     mkdirSync(dirname(this.path), { recursive: true });

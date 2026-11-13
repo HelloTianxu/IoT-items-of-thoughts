@@ -559,6 +559,29 @@ window.__ModuleLoader__.load({
         };
       })();
       const setRewrite = (patch) => set({ rewrite: { ...rewriteCfg, ...patch } });
+
+      const advisorCfg = (() => {
+        const advisor = cfg.advisor && typeof cfg.advisor === "object" && !Array.isArray(cfg.advisor) ? cfg.advisor : {};
+        const route = advisor.route && typeof advisor.route === "object" ? advisor.route : {};
+        return {
+          enabled: advisor.enabled === true,
+          provider: typeof route.provider === "string" ? route.provider : null,
+          model: typeof route.model === "string" ? route.model : null,
+          maxAdvice: Number.isFinite(advisor.maxAdvice) ? advisor.maxAdvice : 3,
+          maxChars: Number.isFinite(advisor.maxChars) ? advisor.maxChars : 600,
+        };
+      })();
+      const setAdvisor = (patch) => {
+        const next = { ...advisorCfg, ...patch };
+        set({
+          advisor: {
+            enabled: next.enabled,
+            route: { provider: next.provider, model: next.model },
+            maxAdvice: next.maxAdvice,
+            maxChars: next.maxChars,
+          },
+        });
+      };
       const routeLabel = (target) => (target && target.provider && target.model ? target.provider + "/" + target.model : "跟随会话");
       const strategyRouteOf = (id) => {
         const overrides = (cfg.strategies && cfg.strategies[id]) || {};
@@ -722,6 +745,71 @@ window.__ModuleLoader__.load({
               h("span", { style: { ...hint, fontSize: 11 } }, field.desc)
             ))
           )
+        ),
+
+        // ── 指导层（外部评审） ──────────────────────────────────────────────
+        h("div", { style: section },
+          h("div", { style: sectionHead },
+            h("div", { style: sectionTitle }, "指导层（外部评审）"),
+            h("span", { style: hint }, advisorCfg.enabled ? "已启用" : "默认关闭")
+          ),
+          h("div", { style: hint },
+            "压缩之后，让另一个（通常更强的）模型看一遍推理骨架并给出下一步建议。它只读几百字的骨架，不读完整上下文 —— 比把整段对话喂给强模型便宜得多。"),
+          h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" } },
+            h("label", { style: { display: "flex", alignItems: "center", gap: 6, ...hint, cursor: "pointer" } },
+              h("input", {
+                type: "checkbox",
+                checked: advisorCfg.enabled,
+                onChange: (e) => setAdvisor({ enabled: e.target.checked }),
+              }),
+              "启用指导"
+            ),
+            h("select", {
+              value: advisorCfg.provider ? "explicit" : "follow",
+              disabled: !advisorCfg.enabled,
+              style: { ...input, flex: "0 0 220px", padding: "6px 8px" },
+              onChange: (e) => setAdvisor(e.target.value === "follow"
+                ? { provider: null, model: null }
+                : { provider: advisorCfg.provider || providerChoices[0] || null, model: advisorCfg.model || modelChoices[0] || null }),
+            },
+              h("option", { value: "follow" }, "跟随压缩器路由"),
+              h("option", { value: "explicit" }, "指定指导模型")
+            ),
+            h("span", { style: hint }, advisorCfg.provider
+              ? "指导请求发往：" + routeLabel({ provider: advisorCfg.provider, model: advisorCfg.model })
+              : "指导请求与压缩器同路由（同模型时收益有限）")
+          ),
+          advisorCfg.enabled
+            ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 } },
+                h("label", { style: limitCell },
+                  h("span", { style: fieldName }, "建议条数上限"),
+                  h("input", {
+                    type: "number",
+                    min: 1,
+                    max: 3,
+                    value: advisorCfg.maxAdvice,
+                    style: { ...input, width: "100%", boxSizing: "border-box" },
+                    onChange: (e) => setAdvisor({ maxAdvice: Number(e.target.value) || 3 }),
+                  }),
+                  h("span", { style: { ...hint, fontSize: 11 } }, "宁少勿多：泛泛而谈的建议不如不给。")
+                ),
+                h("label", { style: limitCell },
+                  h("span", { style: fieldName }, "建议总字数上限"),
+                  h("input", {
+                    type: "number",
+                    min: 80,
+                    max: 600,
+                    step: 50,
+                    value: advisorCfg.maxChars,
+                    style: { ...input, width: "100%", boxSizing: "border-box" },
+                    onChange: (e) => setAdvisor({ maxChars: Number(e.target.value) || 600 }),
+                  }),
+                  h("span", { style: { ...hint, fontSize: 11 } }, "指导会追加到压缩结果后面，占用下一轮上下文。")
+                )
+              )
+            : null,
+          h("div", { style: { ...hint, marginTop: 8 } },
+            "指导不参与压缩档位：压缩是减 token，指导是加信息。两者可以独立开关。")
         ),
 
         // ── 按 agent preset 映射 ────────────────────────────────────────────
