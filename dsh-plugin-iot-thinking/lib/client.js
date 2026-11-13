@@ -704,11 +704,21 @@ window.__ModuleLoader__.load({
       const firstCustom = () => (presetChoices[0] ? presetChoices[0].value : "custom");
       // 切到"自定义预设"时给一个真实可用值：原来的 target 不是具体文件就用第一个文件。
       const compose = (tier, target) => composeTier(tier, target, firstCustom);
+      // 会话覆盖可能是对象 `{ strategy, guidance }`：直接把它当 child 渲染会触发
+      // React #31（Objects are not valid as a React child）。这里先取出档位字符串。
+      const sessionStrategyOf = (value) => {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          return typeof value.strategy === "string" ? value.strategy : "";
+        }
+        return typeof value === "string" ? value : "";
+      };
       const choiceLabel = (value) => {
-        const tier = tiers.find((entry) => entry.value === tierOf(value));
-        if (tierOf(value) !== "custom") return tier ? tier.label : value;
-        const preset = presetChoices.find((entry) => entry.value === value);
-        return "自定义预设 · " + (preset ? preset.label : value === "custom" ? "贴入的文本" : value);
+        const strategy = sessionStrategyOf(value);
+        if (!strategy) return "跟随默认";
+        const tier = tiers.find((entry) => entry.value === tierOf(strategy));
+        if (tierOf(strategy) !== "custom") return tier ? tier.label : strategy;
+        const preset = presetChoices.find((entry) => entry.value === strategy);
+        return "自定义预设 · " + (preset ? preset.label : strategy === "custom" ? "贴入的文本" : strategy);
       };
 
       const activeId = cfg.strategy ?? "iot-full";
