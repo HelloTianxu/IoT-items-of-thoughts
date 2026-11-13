@@ -24,6 +24,7 @@
   "files": [
     "dsh-plugin-iot-thinking/index.mjs",
     "dsh-plugin-iot-thinking/lib/",
+    "dsh-plugin-iot-thinking/skills/",
     "dsh-plugin-iot-thinking/cordis.patch.yml",
     "dsh-plugin-iot-thinking/package.json",
     "dsh-plugin-iot-thinking/README.md"

@@ -142,6 +142,12 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sid>/<time>-block<index>.txt   # �
 | **只有三档是验证过的** | 其余改写方式没有真机数据，按"用户自定义文本"提供，不冒充内置能力 |
 | **模型自述只能当探针，不能当判据** | 实测它三次把原文里根本没有的东西算成"丢失"。有丢失就一定有原因，找得出来才算数 |
 
+## 会话归档与分层记忆（开发版）
+
+新增自动逐轮 Log（原始 thinking、IoT 处理与增强、正文和工具事件）、Session 记忆 CRUD/检索工具以及 `iot-session-memory` Skill。先读记忆总览，细节不足再查原始轮次；不接管 compaction，不在每块后追加长链接。
+
+配置、目录、测试与已知边界统一见 [会话归档与记忆说明](docs/session-memory.md)。当前为仓库实现，未因此自动部署到运行 profile。
+
 ## 文档
 
 | 文档 | 管什么 |

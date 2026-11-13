@@ -73,7 +73,7 @@ await entry.link(async (specifier) => {
 await entry.evaluate();
 const ctx = {
   get: () => undefined,
-  on: (name, handler) => { assert.equal(name, "llm/stream"); streamHook = handler; },
+  on: (name, handler) => { if (name === "llm/stream") streamHook = handler; else assert.ok(['session/event', 'session/created', 'session/flush', 'session/disposed'].includes(name)); },
   effect: (fn) => fn(),
   // This fixture intentionally lacks systemPrompt, as a headless host may.
   // Actual registration/assembly/refresh is exercised by host-context-test.mjs.
@@ -88,7 +88,7 @@ const ctx = {
     } finally { closed = true; }
   } },
 };
-entry.namespace.apply(ctx, { webApi: false, command: false });
+entry.namespace.apply(ctx, { webApi: false, command: false, sessionLog: false, sessionMemory: false });
 const args = { depth: 5, ask: "review", goal: "x".repeat(600), progress: "y".repeat(1200) };
 const exec = (id, signal = new AbortController().signal) => ({ agent: { session: { id } }, signal });
 const save = (patch) => store.save(patch);

@@ -316,6 +316,8 @@ function sanitize(payload) {
   if (payload.rewriteBudget === null) next.rewriteBudget = DEFAULTS.rewriteBudget;
   else if (Number.isFinite(payload.rewriteBudget)) next.rewriteBudget = Math.max(1, Math.floor(payload.rewriteBudget));
   if (typeof payload.archive === "boolean") next.archive = payload.archive;
+  if (typeof payload.sessionLog === "boolean") next.sessionLog = payload.sessionLog;
+  if (typeof payload.sessionMemory === "boolean") next.sessionMemory = payload.sessionMemory;
   if (typeof payload.sessionSwitch === "boolean") next.sessionSwitch = payload.sessionSwitch;
   // 自定义预设三件：目录、贴入的文本、替换规则。
   if (typeof payload.presetDir === "string") next.presetDir = payload.presetDir.trim();

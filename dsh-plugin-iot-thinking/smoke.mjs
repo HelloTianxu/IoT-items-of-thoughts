@@ -86,6 +86,8 @@ writeFileSync(
       model: null,
       reasoningEffort: "auto",
       archive: false,
+      sessionLog: false,
+      sessionMemory: false,
     },
     null,
     2,
@@ -177,7 +179,7 @@ const ctx = {
 };
 ctx.on = (event, handler) => hooks.set(event, handler);
 
-plugin.apply(ctx, {});
+plugin.apply(ctx, { sessionLog: false, sessionMemory: false });
 for (const path of ["/iot-thinking/api/config", "/iot-thinking/api/status", "/iot-thinking/api/models", "/iot-thinking/api/test", "/iot-thinking/api/session", "/iot-thinking/api/presets"]) {
   assert.ok(routes.has(path), `${path} registered`);
 }

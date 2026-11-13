@@ -24,6 +24,14 @@ IoT (Items of Thoughts) for **DeepSeek Harness 0.2.x**，以 **external bundle**
 sessions[<sessionId>]  >  agentPresets[<agent preset id>]  >  strategy（全局默认）
 ```
 
+## 会话归档与 Session 记忆（开发版）
+
+新增 `sessionLog` 与 `sessionMemory` 开关（默认 true，独立于改写档位）。Log 自动按会话/轮次保存原始思考、IoT 处理与增强、正文、工具事件；不复制每次请求的全量历史。当前仅POSIX实现，Windows归档拒绝且保留原始思考。
+
+`iot_session_memory` 提供状态总览/关键记忆的读写、检索、带revision的修改与逻辑删除；`iot_session_log` 提供原始轮次list/search/read。随包的 [iot-session-memory Skill](skills/iot-session-memory/SKILL.md) 通过宿主 skills 注册，教模型先读记忆、不足再读Log。记忆删除不删除日志或历史修订。
+
+完整设计、目录与局限见仓库 [Session 归档与分层记忆](../docs/session-memory.md)。测试：`npm run test:archive`；当前Desktop隔离集成测试：`ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" session-host-test.mjs`。尚未自动部署或验证真实长任务召回效果。
+
 ## 它修的是什么
 
 上一代 `iot-compaction` 走 `ctx.compaction`：dsh 的 compaction 会换掉一段**历史区间**并

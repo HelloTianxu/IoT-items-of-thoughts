@@ -111,6 +111,9 @@ export const DEFAULTS = Object.freeze({
   model: undefined,
   reasoningEffort: undefined,
   archive: true,
+  // Independent of thinking strategy: mirror session events + pre-rewrite reasoning.
+  sessionLog: true,
+  sessionMemory: true,
   // 会话级档位下拉（对话头部）：默认关。多数人用不到 per-session 覆盖，
   // 那行控件反而让人以为"档位要被它管"；/iot 命令始终可用。
   sessionSwitch: false,

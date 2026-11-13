@@ -2,6 +2,8 @@
 // 改写方式由档位决定（lib/strategies.mjs），哪段会话用哪档由 lib/route.mjs 三层解析。
 // 解析必须在钩子内部：llm/stream 是 waterfall，不过 scope filter。
 
+import { registerSessionMemory } from "./lib/session-memory-tools.mjs";
+import { createArchiveRuntime } from "./lib/archive-runtime.mjs";
 import { importSeam } from "./lib/seams.mjs";
 import { ConfigStore, defaultConfigPath } from "./lib/config-store.mjs";
 import { compressThinking } from "./lib/compress.mjs";
@@ -66,6 +68,8 @@ export function agentPresetFor(ctx, sessionId) {
 
 export function apply(ctx, config = {}) {
   const store = new ConfigStore(defaultConfigPath(), config);
+  const sessionArchive = createArchiveRuntime(ctx, { getConfig: () => store.load(), mark });
+  if (config.sessionMemory !== false) registerSessionMemory(ctx, { defineTool, runtime: sessionArchive, getConfig: () => store.load() });
 
   // 自测没有请求可跟随，记住最近一次 agent-loop 请求的路由。
   const lastRoute = { provider: null, model: null };
@@ -121,9 +125,11 @@ export function apply(ctx, config = {}) {
       return { ...resolved, teacherActive: cfg.enabled !== false && resolved.teacher?.enabled === true };
     };
 
-    return transformStream(source, options, {
+    const capture = shouldTransform(options) ? sessionArchive.request(options) : null;
+    return transformStream(capture ? capture.observe(source) : source, options, {
       shouldTransform,
       getConfig,
+      beforeReplace: capture?.replacement,
       rewrite,
       recent: () => recentFor(sessionId),
       remember: (text) => rememberFor(sessionId, text),

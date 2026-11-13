@@ -144,6 +144,18 @@ export async function* transformStream(source, options, deps) {
     const body = candidate.trim();
     const withAdvice = appendAdvice(body, advice);
     const text = withAdvice;
+    // Full-log mode requires durable original AND processed records before replacement.
+    if (deps.beforeReplace) {
+      let archived = false;
+      try { archived = await deps.beforeReplace({ index, original, processed: text, advice, strategy: strategy.id }); }
+      catch (error) { emit('block-archive-failed', { index, message: String(error?.message ?? error) }); }
+      if (!archived) {
+        emit('block-kept', { index, reason: 'session-log-unavailable', strategy: strategy.id });
+        yield* flush(index);
+        yield block;
+        return false;
+      }
+    }
     if (advice) emit("advisor-appended", { index, adviceLines: String(advice).split("\n\n").length, charsAdded: withAdvice.length - body.length });
     yield { type: "reasoning-delta", index, text };
     yield { ...block, type: "block-end", index, block: { ...block.block, text } };
