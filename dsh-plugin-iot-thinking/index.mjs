@@ -10,9 +10,22 @@ import { archiveOriginal, mark } from "./lib/ledger.mjs";
 import { resolveConfig } from "./lib/route.mjs";
 import { switchSessionStrategy } from "./lib/switch.mjs";
 import { transformStream } from "./lib/stream.mjs";
+import {
+  ASK_KINDS,
+  TEACHER_LIMITS,
+  buildTeacherPrompt,
+  canConsult,
+  consultTeacher,
+  extractSessionContext,
+  markConsulted,
+  sessionIdOf,
+  sessionOf,
+  teacherStatus,
+} from "./lib/teacher.mjs";
 
 const Llm = await importSeam("@deepseek-ai/dsh-llm");
 const { isAgentLoopRequest } = Llm;
+const { defineTool } = await importSeam("@deepseek-ai/dsh-tools");
 
 export const name = "iot-thinking";
 export const inject = ["llm"];
@@ -123,6 +136,146 @@ export function apply(ctx, config = {}) {
   // 写的是 `sessions[<sessionId>]`，与设置卡、头部下拉读的是同一张表。
   // 非交互 profile（headless / qqbot 一类）可以设 `command: false` 省掉这条等待。
   if (config.command !== false) registerCommand(ctx, store);
+
+  // 教师咨询工具：由**正在做这件事的模型**主动调用，插件只提供骨架、上下文与冷却闸门。
+  // tools 服务在 web 组合里有；缺失时不报错，插件其余部分照常工作。
+  const teacherTool = () => {
+    const cfgNow = store.load();
+    const teacherCfg = cfgNow.advisor?.teacher && typeof cfgNow.advisor.teacher === "object" ? cfgNow.advisor.teacher : {};
+    const limits = {
+      ...TEACHER_LIMITS,
+      ...(Number.isFinite(teacherCfg.cooldownBlocks) ? { cooldownBlocks: Math.max(0, Math.floor(teacherCfg.cooldownBlocks)) } : {}),
+      ...(Number.isFinite(teacherCfg.inputBudget) ? { inputBudget: Math.max(1000, Math.floor(teacherCfg.inputBudget)) } : {}),
+      ...(Number.isFinite(teacherCfg.maxTokens) ? { maxTokens: Math.max(200, Math.floor(teacherCfg.maxTokens)) } : {}),
+      ...(Array.isArray(teacherCfg.depthRange) && teacherCfg.depthRange.length === 2
+        ? {
+            minDepth: Math.max(1, Math.floor(teacherCfg.depthRange[0])),
+            maxDepth: Math.max(1, Math.floor(teacherCfg.depthRange[1])),
+          }
+        : {}),
+    };
+
+    return defineTool({
+      name: "iot_consult_teacher",
+      description: [
+        "请一位更强的模型（教师）就当前任务给一次限时咨询。",
+        "何时调用由你判断：方案定型前、准备执行不可逆动作前、宣布完成前，或你确实卡住时。",
+        "插件会按 depth 从本会话里抽取最近几轮正文作为背景；你只需说明需求与进展。",
+        "咨询后进入冷却，冷却状态会出现在你的思考里（[教师] 行）。",
+      ].join(" "),
+      parameters: {
+        depth: {
+          type: "number",
+          required: true,
+          description: "要几轮历史上下文（1-5）。越大越贵，通常 2-3 足够。",
+        },
+        ask: {
+          type: "string",
+          required: true,
+          enum: [...ASK_KINDS],
+          description: "要教师产出什么：advice（可执行建议）/ plan（简短方案）/ framework（分析框架）/ approach（换视角思路）/ review（审阅当前进展）。",
+        },
+        goal: {
+          type: "string",
+          required: true,
+          description: "当前需求，一句话说清要达成什么。",
+        },
+        progress: {
+          type: "string",
+          description: "进展综述：已完成什么、卡在哪、已排除什么。",
+        },
+      },
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            ok: { type: "boolean", required: true },
+            text: { type: "string" },
+            reason: { type: "string" },
+            provider: { type: "string" },
+            model: { type: "string" },
+            chars: { type: "number" },
+            available: { type: "boolean" },
+            remainingBlocks: { type: "number" },
+          },
+        },
+        render: (_args, value) => (value?.text ? String(value.text) : String(value?.reason ?? "教师没有返回内容")),
+      },
+      async execute(args, exec) {
+        const cfg = store.load();
+        const teacher = cfg.advisor?.teacher && typeof cfg.advisor.teacher === "object" ? cfg.advisor.teacher : {};
+        const sessionId = sessionIdOf(exec);
+        if (teacher.enabled !== true) {
+          return { ok: false, reason: "教师咨询未启用（在设置卡里打开「教师增强」）", available: false };
+        }
+        // 冷却闸门是**硬约束**：不只是提示，冷却中直接拒绝。
+        if (!canConsult(sessionId)) {
+          const status = teacherStatus(sessionId, limits);
+          return { ok: false, reason: `教师冷却中（还需 ${status.remainingBlocks} 块）`, available: false, remainingBlocks: status.remainingBlocks };
+        }
+        const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
+        const route = resolveAdvisorRoute(cfg, resolved.strategy, lastRoute);
+        if (!route?.provider || !route?.model) {
+          return { ok: false, reason: "没有可用的教师路由：在设置卡里指定建议模型，或先在本会话发一条消息" };
+        }
+        const depth = Math.max(limits.minDepth, Math.min(limits.maxDepth, Math.floor(Number(args.depth) || limits.minDepth)));
+        const session = sessionOf(ctx, sessionId);
+        const rounds = extractSessionContext(session, depth);
+        const prompt = buildTeacherPrompt({
+          goal: args.goal,
+          progress: args.progress,
+          rounds,
+          draft: recentFor(sessionId).slice(-1)[0] ?? "",
+          ask: args.ask,
+          limits,
+        });
+        const result = await consultTeacher({
+          ctx,
+          Llm,
+          route,
+          prompt,
+          options: { sessionId },
+          timeoutMs: Math.max(3000, Math.min(120000, Number(teacher.timeoutMs) || 30000)),
+          maxTokens: limits.maxTokens,
+          effort: cfg.advisor?.effort,
+          temperature: cfg.advisor?.temperature,
+        });
+        if (!result.ok) {
+          mark("teacher-failed", { sessionId, provider: route.provider, model: route.model, code: result.code, message: result.error, depth, rounds: rounds.length });
+          return { ok: false, reason: result.error, provider: route.provider, model: route.model };
+        }
+        const status = markConsulted(sessionId, limits);
+        mark("teacher-consulted", {
+          sessionId,
+          provider: route.provider,
+          model: route.model,
+          ask: args.ask,
+          depth,
+          rounds: rounds.length,
+          chars: result.meta?.chars ?? 0,
+          completionTokens: result.meta?.completionTokens,
+          reasoningTokens: result.meta?.reasoningTokens,
+          remainingBlocks: status.remainingBlocks,
+        });
+        return {
+          ok: true,
+          text: result.text,
+          provider: route.provider,
+          model: route.model,
+          chars: result.meta?.chars ?? result.text.length,
+          available: status.available,
+          remainingBlocks: status.remainingBlocks,
+        };
+      },
+    });
+  };
+
+  ctx.inject(["tools"], (toolCtx) => {
+    const unregister = toolCtx.tools.register(teacherTool());
+    mark("teacher-tool-registered", { name: "iot_consult_teacher" });
+    return () => unregister();
+  });
 
   mark("constructed", { configPath: store.path, strategy: store.load().strategy });
   ctx.effect(() => () => mark("disposed"));

@@ -215,6 +215,49 @@ sessions: {
 事件：`advisor-called` / `advisor-ready` / `advisor-injected` / `advisor-skipped` / `advisor-failed` /
 `advisor-usage`。
 
+### 教师增强（模型主动咨询）
+
+按块自动触发建议有个根本问题：**重要性是任务状态，不是文本特征**。长会话里 `[决定]`/`[风险]`
+早就出现过，规则会误触发；用户回一句「继续」也不是新需求。所以时机判断交给**正在做这件事的模型**。
+
+开启后插件注册一个工具：
+
+```
+iot_consult_teacher(depth, ask, goal, progress)
+```
+
+- `depth`（1-5）：要几轮历史上下文，**由模型决定**；插件按它抽取并固定格式化；
+- `ask`：`advice` / `plan` / `framework` / `approach` / `review`，决定教师输出的结构；
+- `goal` / `progress`：需求与进展综述。
+
+**插件负责的三件事**（这是它比"用户直接调强模型"可靠的原因）：
+
+1. **系统提示词骨架固定**——角色、边界、输出纪律由插件写死，模型只能填槽位；
+2. **上下文由插件组织**——只取用户消息与助手结论正文，按 `inputBudget` 裁剪，工具细节与思考过程只留摘要；
+3. **冷却闸门（CD）**——调用后进入冷却，冷却状态以 `[教师] 可用 / [教师] 冷却中 · 还需 N 块` 注入思考。
+
+CD 按**块**计量，只暴露冷却、不暴露总额（避免"不用白不用"的心理）。失败与超时**不进**冷却——
+一次没生效的咨询不该让模型付出代价。
+
+```jsonc
+"advisor": {
+  "teacher": {
+    "enabled": false,        // 打开后才注入状态行
+    "cooldownBlocks": 3,
+    "depthRange": [1, 5],
+    "inputBudget": 12000,
+    "maxTokens": 1500,
+    "timeoutMs": 30000
+  }
+}
+```
+
+咨询是**同步**的（模型主动调用，代价由它自己承担），但必须有终点：超时返回明确结果，
+不会把主任务挂死。
+
+事件：`teacher-tool-registered` / `teacher-consulted` / `teacher-failed` /
+`teacher-status-appended`。
+
 ⚠️ 指导模型与工作模型相同（或同源）时收益有限；要发挥"老师"作用，应指向一个**不同的、更强的**模型。
 
 ### 压缩器路由（算力卸载）

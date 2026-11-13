@@ -73,6 +73,21 @@ export const DEFAULTS = Object.freeze({
     wait: true,
     /** 建议输出 token 预算；不配时按 maxChars 推算（中文约 2 token/字）。 */
     maxTokens: null,
+    /**
+     * 教师咨询（由模型主动调用 iot_consult_teacher）：
+     * - enabled：session 开关，打开后 think 里注入冷却状态行；
+     * - cooldownBlocks：调用后冷却多少个 thinking 块；
+     * - depthRange：允许模型要求的上下文轮次范围；
+     * - inputBudget：咨询提示词字符上限（插件裁剪）。
+     */
+    teacher: {
+      enabled: false,
+      cooldownBlocks: 3,
+      depthRange: [1, 5],
+      inputBudget: 12000,
+      maxTokens: 1500,
+      timeoutMs: 30000,
+    },
     timeoutMs: 30000,
     maxAdvice: 3,
     maxChars: 600,
@@ -202,6 +217,23 @@ function guidanceConfig(value, advisor, explicit) {
   return { enabled, mode };
 }
 
+/** 教师咨询配置：session 开关、冷却块数、深度范围与输入预算。 */
+function teacherConfig(value) {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const range = Array.isArray(raw.depthRange) && raw.depthRange.length === 2
+    ? [clampInt(raw.depthRange[0], 1, 5, 1), clampInt(raw.depthRange[1], 1, 5, 5)]
+    : [1, 5];
+  const [low, high] = range[0] <= range[1] ? range : [range[1], range[0]];
+  return {
+    enabled: raw.enabled === true,
+    cooldownBlocks: clampInt(raw.cooldownBlocks, 0, 20, 3),
+    depthRange: [low, high],
+    inputBudget: clampInt(raw.inputBudget, 1000, 40000, 12000),
+    maxTokens: clampInt(raw.maxTokens, 200, 8000, 1500),
+    timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
+  };
+}
+
 /** 指导层配置：开关、路由、超时与条数上限；非法值一律落回安全默认。 */
 function advisorConfig(value) {
   const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -216,6 +248,7 @@ function advisorConfig(value) {
     temperature: raw.temperature === null ? null : Number.isFinite(raw.temperature) ? raw.temperature : 0.3,
     wait: raw.wait !== false,
     maxTokens: Number.isFinite(raw.maxTokens) ? clampInt(raw.maxTokens, 200, 8000, 1200) : null,
+    teacher: teacherConfig(raw.teacher),
     timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
     maxAdvice: clampInt(raw.maxAdvice, 1, 3, 3),
     maxChars: clampInt(raw.maxChars, 80, 600, 600),

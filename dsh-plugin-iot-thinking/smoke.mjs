@@ -96,6 +96,7 @@ writeFileSync(
 const { importSeam } = await import(pathToFileURL(join(pluginDir, "lib", "seams.mjs")).href);
 const Llm = await importSeam("@deepseek-ai/dsh-llm");
 
+const tools = new Map();
 const plugin = await import(pathToFileURL(join(pluginDir, "index.mjs")).href);
 assert.equal(plugin.name, "iot-thinking");
 assert.deepEqual(plugin.inject, ["llm"]);
@@ -161,7 +162,17 @@ const ctx = {
   // `available: false` 而不是 500，卡片据此退化成手输 id。
   get: (name) => (name === "webServer" ? webServer : undefined),
   effect: () => {},
-  inject: () => {},
+  // 真的执行回调：教师工具的注册路径必须被走到，否则"注册了但没人调"测不出来。
+  inject: (_names, factory) => factory({
+    // 回调拿到的是"子 fiber"上下文：这里给足插件实际会用到的两样东西。
+    get: (name) => (name === "webServer" ? webServer : undefined),
+    tools: {
+      register: (definition) => {
+        tools.set(definition.name, definition);
+        return () => tools.delete(definition.name);
+      },
+    },
+  }),
   logger: { warn: (message) => console.log("warn:", message) },
 };
 ctx.on = (event, handler) => hooks.set(event, handler);
@@ -172,6 +183,15 @@ for (const path of ["/iot-thinking/api/config", "/iot-thinking/api/status", "/io
 }
 const streamHook = hooks.get("llm/stream");
 assert.equal(typeof streamHook, "function", "llm/stream hook registered");
+
+// 教师咨询工具必须注册成功，且参数/输出声明完整。
+assert.ok(tools.has("iot_consult_teacher"), "iot_consult_teacher registered");
+{
+  const tool = tools.get("iot_consult_teacher");
+  const params = tool.parameters?.properties ?? tool.parameters ?? {};
+  assert.ok(params.depth && params.ask, "参数声明完整");
+  assert.ok(tool.output && typeof tool.output.render === "function", "输出 render 存在");
+}
 
 // One real agent-loop request: a reasoning block that must be compressed in
 // place. The compressor rejects `off` first, so this also exercises the

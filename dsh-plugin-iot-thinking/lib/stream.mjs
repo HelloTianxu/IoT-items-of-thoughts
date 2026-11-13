@@ -5,6 +5,7 @@
 
 import { DEFAULT_STRATEGY, isShorterReplacement, strategyById } from "./strategies.mjs";
 import { appendAdvice } from "./advisor.mjs";
+import { formatTeacherStatus, noteBlock, teacherStatus } from "./teacher.mjs";
 
 export { isShorterReplacement };
 
@@ -133,8 +134,16 @@ export async function* transformStream(source, options, deps) {
     }
 
     const body = candidate.trim();
-    const text = appendAdvice(body, advice);
-    if (advice) emit("advisor-appended", { index, adviceLines: String(advice).split("\n\n").length, charsAdded: text.length - body.length });
+    const withAdvice = appendAdvice(body, advice);
+    // 教师咨询的冷却状态：固定格式、固定位置（末尾），属于"状态"不是"内容"。
+    // 它在这里追加，所以不会被压缩器重映射/截断。
+    const teacherCfg = cfg?.advisor?.teacher && typeof cfg.advisor.teacher === "object" ? cfg.advisor.teacher : null;
+    const statusLine = teacherCfg?.enabled === true
+      ? formatTeacherStatus(teacherStatus(options?.sessionId, teacherCfg), teacherCfg)
+      : "";
+    const text = statusLine ? `${withAdvice}\n\n${statusLine}` : withAdvice;
+    if (advice) emit("advisor-appended", { index, adviceLines: String(advice).split("\n\n").length, charsAdded: withAdvice.length - body.length });
+    if (statusLine) emit("teacher-status-appended", { index, status: statusLine });
     yield { type: "reasoning-delta", index, text };
     yield { ...block, type: "block-end", index, block: { ...block.block, text } };
     buffers.delete(index);
@@ -167,6 +176,13 @@ export async function* transformStream(source, options, deps) {
 
     if (chunk?.type === "block-end" && chunk.block?.type === "reasoning") {
       const buffered = buffers.get(chunk.index);
+      // CD 按"块"计量：每个 thinking 块结束都推进一次，无论这一块是否被替换。
+      // 否则冷却永远不转，模型会看到一条永远"冷却中"的状态行。
+      try {
+        noteBlock(options?.sessionId);
+      } catch {
+        /* 状态推进失败不该影响主流程 */
+      }
       // A block-end without deltas still carries its assembled text.
       if (buffered || String(chunk.block.text ?? "").trim()) {
         yield* replace(chunk.index, chunk, buffered);

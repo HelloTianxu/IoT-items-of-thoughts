@@ -60,6 +60,18 @@ import {
 } from "./lib/strategies.mjs";
 import { switchSessionStrategy } from "./lib/switch.mjs";
 import { buildCustomPrompt, listPresets, readPreset, resolvePresetDir, writePreset } from "./lib/custom.mjs";
+import {
+  ASK_KINDS,
+  buildTeacherPrompt,
+  canConsult,
+  consultTeacher,
+  extractSessionContext,
+  formatTeacherStatus,
+  markConsulted,
+  noteBlock,
+  resetTeacherState,
+  teacherStatus,
+} from "./lib/teacher.mjs";
 
 let failures = 0;
 async function check(name, fn) {
@@ -1860,6 +1872,98 @@ await check("改写调用超时必须返回：不响应 abort 的流也要保留
   assert.equal(result, null, "超时要返回 null（保留原文）");
   assert.ok(elapsed < 3000, "应在超时附近返回（实际 " + elapsed + "ms）");
   assert.ok(events.some((entry) => entry.event === "thinking-failed" && entry.code === "REWRITE_TIMEOUT"));
+});
+
+await check("教师冷却：调用后进入 CD，按块递减，冷却中拒绝调用", () => {
+  resetTeacherState();
+  const limits = { cooldownBlocks: 3, minDepth: 1, maxDepth: 5 };
+  assert.equal(canConsult("s1"), true, "初始可用");
+  noteBlock("s1");
+  noteBlock("s1");
+  markConsulted("s1", limits);
+  assert.equal(canConsult("s1"), false, "调用后冷却");
+  assert.equal(teacherStatus("s1", limits).remainingBlocks, 3);
+  noteBlock("s1");
+  assert.equal(teacherStatus("s1", limits).remainingBlocks, 2, "块推进要递减");
+  noteBlock("s1");
+  noteBlock("s1");
+  assert.equal(canConsult("s1"), true, "冷却结束恢复可用");
+  // 会话隔离：另一个会话不受影响。
+  assert.equal(canConsult("s2"), true);
+  resetTeacherState();
+});
+
+await check("教师状态行：只显示可用/冷却，不显示总额", () => {
+  resetTeacherState();
+  const limits = { cooldownBlocks: 2, minDepth: 1, maxDepth: 5 };
+  const available = formatTeacherStatus(teacherStatus("s1", limits), limits);
+  assert.ok(available.includes("可用"), "初始要显示可用");
+  assert.ok(available.includes("深度 1-5"), "要说明深度范围");
+  markConsulted("s1", limits);
+  const cooling = formatTeacherStatus(teacherStatus("s1", limits), limits);
+  assert.ok(cooling.includes("冷却中"), "调用后显示冷却");
+  assert.ok(cooling.includes("2"), "要显示剩余块数");
+  assert.ok(!cooling.includes("次"), "不该暴露总次数");
+  resetTeacherState();
+});
+
+await check("教师提示词：骨架固定、ask 决定输出结构、上下文按顺序组装", () => {
+  const prompt = buildTeacherPrompt({
+    goal: "把登录改成 OAuth",
+    progress: "已完成回调，卡在 token 刷新",
+    rounds: [{ user: "把登录改成 OAuth", assistant: "[决定] 用授权码模式。" }],
+    draft: "[待定] 刷新令牌要不要轮换？",
+    ask: "plan",
+    limits: { inputBudget: 12000 },
+  });
+  assert.ok(prompt.includes("你是一位资深工程师"), "系统提示词骨架要在");
+  assert.ok(prompt.includes("## 当前需求"), "需求段要在");
+  assert.ok(prompt.includes("## 最近轮次"), "轮次段要在");
+  assert.ok(prompt.includes("## 本次要你做什么"), "任务段要在");
+  assert.ok(prompt.includes("简短方案"), "plan 模板要生效");
+  assert.ok(!prompt.includes("1~3 条**可执行**建议"), "不该混入 advice 模板");
+  // ask 非法时回落到 advice。
+  const fallback = buildTeacherPrompt({ goal: "x", ask: "nonsense" });
+  assert.ok(fallback.includes("1~3 条**可执行**建议"), "非法 ask 回落到 advice");
+  assert.equal(ASK_KINDS.length, 5);
+});
+
+await check("教师上下文抽取：只取正文，按轮聚合，depth 限制轮数", () => {
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "第一个需求" }] },
+    { role: "assistant", content: [{ type: "text", text: "[决定] 先做 A。" }] },
+    { role: "user", content: [{ type: "text", text: "第二个需求" }] },
+    { role: "assistant", content: [{ type: "text", text: "[决定] 先做 B。" }] },
+    { role: "user", content: [{ type: "text", text: "继续" }] },
+  ];
+  const fakeSession = {
+    log: messages.map((_, index) => ({ seq: index })),
+    surface: { deriveEventMessage: (event) => messages[event.seq] },
+  };
+  const one = extractSessionContext(fakeSession, 1);
+  assert.equal(one.length, 1, "depth=1 只要一轮");
+  assert.equal(one[0].user, "继续", "取最近的一轮");
+  const all = extractSessionContext(fakeSession, 5);
+  assert.equal(all.length, 3, "最多三轮用户消息");
+  assert.equal(all[0].user, "第一个需求", "顺序要按时间正序");
+  assert.ok(all[0].assistant.includes("先做 A"), "助手结论要带上");
+  assert.deepEqual(extractSessionContext(null, 3), [], "拿不到会话要返回空");
+});
+
+await check("教师咨询超时必返回：不响应 abort 的流不能挂死", async () => {
+  const ctx = { llm: { stream: () => (async function* () { await new Promise(() => {}); })() } };
+  const started = Date.now();
+  const result = await consultTeacher({
+    ctx,
+    Llm: { BlockAssembler: class { push() {} blocks() { return []; } get finish() { return undefined; } }, createUserMessage: strictCreateUserMessage },
+    route: { provider: "p", model: "m" },
+    prompt: "x",
+    options: {},
+    timeoutMs: 200,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "TEACHER_TIMEOUT");
+  assert.ok(Date.now() - started < 1000, "要按时返回");
 });
 
 await check("失败消息可读：对象形态的失败载荷不能变成 [object Object]", () => {

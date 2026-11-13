@@ -666,6 +666,16 @@ window.__ModuleLoader__.load({
           effort: typeof advisor.effort === "string" ? advisor.effort : "auto",
           temperature: advisor.temperature === null ? null : Number.isFinite(advisor.temperature) ? advisor.temperature : 0.3,
           wait: advisor.wait !== false,
+          teacher: advisor.teacher && typeof advisor.teacher === "object" && !Array.isArray(advisor.teacher)
+            ? {
+                enabled: advisor.teacher.enabled === true,
+                cooldownBlocks: Number.isFinite(advisor.teacher.cooldownBlocks) ? advisor.teacher.cooldownBlocks : 3,
+                depthMin: Array.isArray(advisor.teacher.depthRange) ? Math.max(1, Math.min(5, Number(advisor.teacher.depthRange[0]) || 1)) : 1,
+                depthMax: Array.isArray(advisor.teacher.depthRange) ? Math.max(1, Math.min(5, Number(advisor.teacher.depthRange[1]) || 5)) : 5,
+                inputBudget: Number.isFinite(advisor.teacher.inputBudget) ? advisor.teacher.inputBudget : 12000,
+                maxTokens: Number.isFinite(advisor.teacher.maxTokens) ? advisor.teacher.maxTokens : 1500,
+              }
+            : { enabled: false, cooldownBlocks: 3, depthMin: 1, depthMax: 5, inputBudget: 12000, maxTokens: 1500 },
         };
       })();
       const setAdvisor = (patch) => {
@@ -679,6 +689,13 @@ window.__ModuleLoader__.load({
             wait: next.wait,
             maxAdvice: next.maxAdvice,
             maxChars: next.maxChars,
+            teacher: {
+              enabled: next.teacher?.enabled === true,
+              cooldownBlocks: next.teacher?.cooldownBlocks ?? 3,
+              depthRange: [next.teacher?.depthMin ?? 1, next.teacher?.depthMax ?? 5],
+              inputBudget: next.teacher?.inputBudget ?? 12000,
+              maxTokens: next.teacher?.maxTokens ?? 1500,
+            },
           },
         });
       };
@@ -995,6 +1012,67 @@ window.__ModuleLoader__.load({
                 )
               )
             : null,
+          // 教师咨询：时机由模型判断，插件只提供骨架、上下文与冷却。
+          h("div", { style: { marginTop: 12, paddingTop: 10, borderTop: "1px dashed var(--dsw-alias-border-l2, #e6e9ee)" } },
+            h("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+              h("label", { style: { display: "flex", alignItems: "center", gap: 6, ...hint, cursor: "pointer" } },
+                h("input", {
+                  type: "checkbox",
+                  checked: advisorCfg.teacher.enabled,
+                  onChange: (e) => setAdvisor({ teacher: { ...advisorCfg.teacher, enabled: e.target.checked } }),
+                }),
+                h("span", { style: { fontSize: 12.5, fontWeight: 600, color: "inherit" } }, "教师增强（模型主动咨询）")
+              ),
+              h("span", { style: hint }, advisorCfg.teacher.enabled ? "已启用 · 状态行会注入思考" : "默认关闭")
+            ),
+            h("div", { style: { ...hint, marginTop: 4 } },
+              "开启后模型可以调用 iot_consult_teacher：插件按它要求的轮次抽取会话正文，交给更强的模型做一次限时咨询。",
+              "何时调用由模型判断（方案定型前、执行不可逆动作前、宣布完成前、或确实卡住），插件只负责固定提示词骨架、上下文格式化与冷却。"),
+            advisorCfg.teacher.enabled
+              ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginTop: 8 } },
+                  h("label", { style: limitCell },
+                    h("span", { style: fieldName }, "冷却块数"),
+                    h("input", {
+                      type: "number",
+                      min: 0,
+                      max: 20,
+                      value: advisorCfg.teacher.cooldownBlocks,
+                      style: { ...input, width: "100%", boxSizing: "border-box" },
+                      onChange: (e) => setAdvisor({ teacher: { ...advisorCfg.teacher, cooldownBlocks: Math.max(0, Number(e.target.value) || 0) } }),
+                    }),
+                    h("span", { style: { ...hint, fontSize: 11 } }, "调用后要过多少个思考块才能再咨询。只显示冷却，不显示总额。")
+                  ),
+                  h("label", { style: limitCell },
+                    h("span", { style: fieldName }, "深度范围（轮）"),
+                    h("div", { style: { display: "flex", gap: 6 } },
+                      h("input", {
+                        type: "number", min: 1, max: 5,
+                        value: advisorCfg.teacher.depthMin,
+                        style: { ...input, width: "50%", boxSizing: "border-box" },
+                        onChange: (e) => setAdvisor({ teacher: { ...advisorCfg.teacher, depthMin: Math.max(1, Math.min(5, Number(e.target.value) || 1)) } }),
+                      }),
+                      h("input", {
+                        type: "number", min: 1, max: 5,
+                        value: advisorCfg.teacher.depthMax,
+                        style: { ...input, width: "50%", boxSizing: "border-box" },
+                        onChange: (e) => setAdvisor({ teacher: { ...advisorCfg.teacher, depthMax: Math.max(1, Math.min(5, Number(e.target.value) || 5)) } }),
+                      })
+                    ),
+                    h("span", { style: { ...hint, fontSize: 11 } }, "模型可以要求的上下文轮次上限；越大越贵。")
+                  ),
+                  h("label", { style: limitCell },
+                    h("span", { style: fieldName }, "咨询输入上限（字符）"),
+                    h("input", {
+                      type: "number", min: 1000, max: 40000, step: 1000,
+                      value: advisorCfg.teacher.inputBudget,
+                      style: { ...input, width: "100%", boxSizing: "border-box" },
+                      onChange: (e) => setAdvisor({ teacher: { ...advisorCfg.teacher, inputBudget: Math.max(1000, Number(e.target.value) || 12000) } }),
+                    }),
+                    h("span", { style: { ...hint, fontSize: 11 } }, "插件按这个上限裁剪提示词，超了从旧轮次开始砍。")
+                  )
+                )
+              : null
+          ),
           h("div", { style: { ...hint, marginTop: 8 } },
             "指导不参与压缩档位：压缩是减 token，指导是加信息。两者可以独立开关。")
         ),

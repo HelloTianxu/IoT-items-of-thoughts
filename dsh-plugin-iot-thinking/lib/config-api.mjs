@@ -365,6 +365,22 @@ function sanitize(payload) {
       if (Number.isFinite(raw[key])) out[key] = Math.floor(raw[key]);
     }
     if (typeof raw.goal === "string") out.goal = raw.goal.slice(0, 400);
+    // 教师咨询：session 开关 + 冷却 + 深度范围 + 输入预算。
+    if (raw.teacher !== undefined) {
+      const teacher = raw.teacher && typeof raw.teacher === "object" && !Array.isArray(raw.teacher) ? raw.teacher : {};
+      const nextTeacher = {};
+      if (typeof teacher.enabled === "boolean") nextTeacher.enabled = teacher.enabled;
+      if (Number.isFinite(teacher.cooldownBlocks)) nextTeacher.cooldownBlocks = Math.max(0, Math.floor(teacher.cooldownBlocks));
+      if (Array.isArray(teacher.depthRange) && teacher.depthRange.length === 2) {
+        const low = Math.max(1, Math.min(5, Math.floor(Number(teacher.depthRange[0]) || 1)));
+        const high = Math.max(1, Math.min(5, Math.floor(Number(teacher.depthRange[1]) || 5)));
+        nextTeacher.depthRange = [Math.min(low, high), Math.max(low, high)];
+      }
+      if (Number.isFinite(teacher.inputBudget)) nextTeacher.inputBudget = Math.max(1000, Math.floor(teacher.inputBudget));
+      if (Number.isFinite(teacher.maxTokens)) nextTeacher.maxTokens = Math.max(200, Math.floor(teacher.maxTokens));
+      if (Number.isFinite(teacher.timeoutMs)) nextTeacher.timeoutMs = Math.max(3000, Math.floor(teacher.timeoutMs));
+      out.teacher = nextTeacher;
+    }
     next.advisor = out;
   }
   // 改写器路由（算力卸载）：新形状是 `rewrite` 块；旧卡片发的顶层
