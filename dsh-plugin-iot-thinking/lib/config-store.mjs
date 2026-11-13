@@ -60,6 +60,8 @@ export const DEFAULTS = Object.freeze({
   advisor: {
     enabled: false,
     route: { provider: null, model: null },
+    /** 指导模型的思考档位：auto = 先试 off，被拒再探最低档，再不行不发字段。 */
+    effort: "auto",
     timeoutMs: 30000,
     maxAdvice: 3,
     maxChars: 600,
@@ -183,9 +185,11 @@ function advisorConfig(value) {
   const route = raw.route && typeof raw.route === "object" && !Array.isArray(raw.route) ? raw.route : {};
   const provider = typeof route.provider === "string" && route.provider.trim() ? route.provider.trim() : null;
   const model = typeof route.model === "string" && route.model.trim() ? route.model.trim() : null;
+  const effort = normalizeEffort(raw.effort);
   return {
     enabled: raw.enabled === true,
     route: { provider, model },
+    effort: effort ?? "auto",
     timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
     maxAdvice: clampInt(raw.maxAdvice, 1, 3, 3),
     maxChars: clampInt(raw.maxChars, 80, 600, 600),

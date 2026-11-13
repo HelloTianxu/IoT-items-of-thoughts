@@ -208,6 +208,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(false);
       const [providers, setProviders] = useState([]);
       const [models, setModels] = useState([]);
+      /** 指导模型自己的目录：与压缩路由的 models 分开，互不覆盖。 */
+      const [advisorModels, setAdvisorModels] = useState([]);
+      const [advisorReasoning, setAdvisorReasoning] = useState(null);
       const [reasoning, setReasoning] = useState(null);
       const [sessionRoute, setSessionRoute] = useState(null);
       const [catalogNote, setCatalogNote] = useState(null);
@@ -390,6 +393,39 @@ window.__ModuleLoader__.load({
       };
 
       useEffect(() => { load(false); loadPresets(); }, []);
+
+      // 指导模型的模型目录与真实档位：按 advisor.route 单独拉，不能复用压缩路由的目录。
+      useEffect(() => {
+        if (cfg === null) return;
+        const route = cfg.advisor && typeof cfg.advisor === "object" && cfg.advisor.route && typeof cfg.advisor.route === "object"
+          ? cfg.advisor.route
+          : {};
+        const provider = typeof route.provider === "string" ? route.provider : "";
+        const model = typeof route.model === "string" ? route.model : "";
+        let cancelled = false;
+        const timer = setTimeout(async () => {
+          try {
+            const qs = new URLSearchParams();
+            if (provider) qs.set("provider", provider);
+            if (provider && model) qs.set("model", model);
+            const suffix = qs.toString() ? "?" + qs.toString() : "";
+            const resp = await fetch(MODELS + suffix, { headers: GUARD });
+            const data = await resp.json().catch(() => null);
+            if (cancelled || !resp.ok || !data) return;
+            setAdvisorModels(Array.isArray(data.models) ? data.models : []);
+            setAdvisorReasoning(data.reasoning ?? null);
+          } catch {
+            if (!cancelled) {
+              setAdvisorModels([]);
+              setAdvisorReasoning(null);
+            }
+          }
+        }, 400);
+        return () => {
+          cancelled = true;
+          clearTimeout(timer);
+        };
+      }, [cfg?.advisor?.route?.provider, cfg?.advisor?.route?.model]);
       useEffect(() => {
         if (cfg === null) return;
         // Typing a provider/model by hand fires this on every keystroke; debounce
@@ -577,6 +613,7 @@ window.__ModuleLoader__.load({
           model: typeof route.model === "string" ? route.model : null,
           maxAdvice: Number.isFinite(advisor.maxAdvice) ? advisor.maxAdvice : 3,
           maxChars: Number.isFinite(advisor.maxChars) ? advisor.maxChars : 600,
+          effort: typeof advisor.effort === "string" ? advisor.effort : "auto",
         };
       })();
       const setAdvisor = (patch) => {
@@ -585,6 +622,7 @@ window.__ModuleLoader__.load({
           guidance: { enabled: next.enabled, mode: next.mode },
           advisor: {
             route: { provider: next.provider, model: next.model },
+            effort: next.effort,
             maxAdvice: next.maxAdvice,
             maxChars: next.maxChars,
           },
@@ -783,20 +821,50 @@ window.__ModuleLoader__.load({
             ),
             advisorCfg.mode === "external"
               ? h("select", {
-                  value: advisorCfg.provider ? "explicit" : "follow",
+                  value: advisorCfg.provider ?? "",
                   disabled: !advisorCfg.enabled,
-                  style: { ...input, flex: "0 0 220px", padding: "6px 8px" },
-                  onChange: (e) => setAdvisor(e.target.value === "follow"
-                    ? { provider: null, model: null }
-                    : { provider: advisorCfg.provider || providerChoices[0] || null, model: advisorCfg.model || modelChoices[0] || null }),
+                  title: "指导模型走哪条路由；留空 = 跟随压缩器路由",
+                  style: { ...input, flex: "0 0 170px", padding: "6px 8px" },
+                  onChange: (e) => setAdvisor({ provider: e.target.value || null, model: null }),
                 },
-                  h("option", { value: "follow" }, "跟随压缩器路由"),
-                  h("option", { value: "explicit" }, "指定指导模型")
+                  h("option", { value: "" }, "跟随压缩器路由"),
+                  ...providers.map((entry) => h("option", { key: entry.id, value: entry.id }, entry.id))
+                )
+              : null,
+            advisorCfg.mode === "external" && advisorCfg.provider
+              ? h("select", {
+                  value: advisorCfg.model ?? "",
+                  disabled: !advisorCfg.enabled,
+                  title: "指导模型（从该 provider 的模型列表里选）",
+                  style: { ...input, flex: "0 0 260px", padding: "6px 8px" },
+                  onChange: (e) => setAdvisor({ model: e.target.value || null }),
+                },
+                  h("option", { value: "" }, "选择模型"),
+                  ...advisorModels.map((entry) => h("option", { key: entry.id, value: entry.id }, entry.name ?? entry.id))
+                )
+              : null,
+            advisorCfg.mode === "external" && advisorCfg.provider && advisorCfg.model
+              ? h("select", {
+                  value: advisorCfg.effort ?? "auto",
+                  disabled: !advisorCfg.enabled,
+                  title: "指导模型的思考档位；auto = 先试 off，被拒再探最低档，再不行不发该字段",
+                  style: { ...input, flex: "0 0 130px", padding: "6px 8px" },
+                  onChange: (e) => setAdvisor({ effort: e.target.value }),
+                },
+                  ...(() => {
+                    const advertised = advisorReasoning && Array.isArray(advisorReasoning.efforts) ? advisorReasoning.efforts : null;
+                    const list = ["auto", ...(advertised ? advertised.map((entry) => entry.id) : [...EFFORT_IDS])];
+                    if (advisorCfg.effort && !list.includes(advisorCfg.effort)) list.push(advisorCfg.effort);
+                    return list.map((id) => h("option", { key: id, value: id }, EFFORT_LABELS[id] ?? id));
+                  })()
                 )
               : null,
             advisorCfg.mode === "external"
-              ? h("span", { style: hint }, advisorCfg.provider
+              ? h("span", { style: hint }, advisorCfg.provider && advisorCfg.model
                   ? "指导请求发往：" + routeLabel({ provider: advisorCfg.provider, model: advisorCfg.model })
+                    + (advisorReasoning && Array.isArray(advisorReasoning.efforts) && advisorReasoning.efforts.length
+                      ? "（该模型公开档位：" + advisorReasoning.efforts.map((entry) => entry.id).join("/") + "）"
+                      : "（未拿到该模型的档位目录，auto 会按实际拒绝情况降级）")
                   : "指导请求与压缩器同路由（同模型时收益有限）")
               : h("span", { style: hint }, "内置指导不额外调用模型，成本与普通压缩相同")
           ),

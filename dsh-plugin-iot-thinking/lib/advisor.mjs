@@ -10,6 +10,15 @@
 // 把两者塞进一个档位会让"想少留一点但又要指导"变得没法表达。
 
 import { normalizeRouteTarget } from "./route.mjs";
+import {
+  AUTO_EFFORT,
+  isUnsupportedEffortFailure,
+  knownEffortPlan,
+  normalizeEffort,
+  pickLowEffort,
+  planKey,
+  rememberEffortPlan,
+} from "./effort.mjs";
 
 /** 指导输出的标签：独立于压缩节点，不参与节点预算与优先级排序。 */
 export const ADVISOR_LABEL = "[指导]";
@@ -116,7 +125,32 @@ export function formatAdvice(raw, limits = {}) {
  * 一次指导调用。失败一律返回 null —— 指导是**增强**，不是必需；
  * 它挂了不该影响这一块的压缩结果，也不该阻塞主流程。
  */
-export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace }) {
+/**
+ * 指导模型的思考档位：与压缩器同样的 auto 语义 —— 先试 off，被拒就探这个路由
+ * 公开的最低档，再被拒就不发字段，并把结论按 route+mode 记住，避免每块白试一次。
+ * 指导是并发的一路，多一次降级调用会拖慢它，所以缓存尤其重要。
+ */
+async function effortForAdvisor({ ctx, route, requested, options, onEvent }) {
+  const mode = normalizeEffort(requested) ?? AUTO_EFFORT;
+  const key = planKey(route.provider, route.model, mode);
+  const known = knownEffortPlan(key);
+  const send = known !== undefined ? known : mode === AUTO_EFFORT ? "off" : mode;
+  return { mode, key, send };
+}
+
+async function probeLowEffortForAdvisor({ ctx, route, options, onEvent }) {
+  const llm = (typeof ctx.get === "function" ? ctx.get("llm") : undefined) ?? ctx?.llm;
+  if (typeof llm?.resolveModelInfo !== "function") return { answered: false, effort: null };
+  try {
+    const info = await llm.resolveModelInfo(route.provider, route.model, options?.signal);
+    return { answered: true, effort: pickLowEffort((info?.reasoning?.efforts ?? []).map((effort) => effort?.id)) };
+  } catch (error) {
+    onEvent?.("advisor-effort-probe-failed", { provider: route.provider, model: route.model, message: String(error?.message ?? error) });
+    return { answered: false, effort: null };
+  }
+}
+
+export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace, effort }) {
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const signal = controller?.signal ?? options?.signal;
   let timedOut = false;
@@ -126,50 +160,80 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
   }, timeoutMs);
   timer.unref?.();
 
-  const assembler = new Llm.BlockAssembler();
-  let usage = null;
-  try {
-    const stream = ctx.llm.stream({
-      provider: route.provider,
-      model: route.model,
-      messages: [Llm.createUserMessage(prompt)],
-      maxTokens: 800,
-      temperature: 0.3,
-      purpose: "compaction",
-      ...(signal === undefined ? {} : { signal }),
-    });
-    for await (const chunk of stream) {
-      if (chunk?.type === "usage") usage = chunk?.usage ?? chunk;
-      assembler.push(chunk);
+  const { mode, key, send } = await effortForAdvisor({ ctx, route, requested: effort, options, onEvent });
+
+  /** 一次调用；超时与传输错误都以 `{ error }` 返回，交给外层决定是否降级。 */
+  const callOnce = async (effortSent) => {
+    const assembler = new Llm.BlockAssembler();
+    let usage = null;
+    try {
+      const stream = ctx.llm.stream({
+        provider: route.provider,
+        model: route.model,
+        messages: [Llm.createUserMessage(prompt)],
+        maxTokens: 800,
+        temperature: 0.3,
+        purpose: "compaction",
+        ...(effortSent === null ? {} : { reasoningEffort: effortSent }),
+        ...(signal === undefined ? {} : { signal }),
+      });
+      for await (const chunk of stream) {
+        if (chunk?.type === "usage") usage = chunk?.usage ?? chunk;
+        assembler.push(chunk);
+      }
+    } catch (error) {
+      return {
+        error: timedOut ? `指导调用超时（${timeoutMs} ms）` : String(error?.message ?? error),
+        code: timedOut ? "ADVISOR_TIMEOUT" : error?.code,
+        usage,
+        finish: assembler.finish,
+        effortSent,
+      };
     }
-  } catch (error) {
-    clearTimeout(timer);
-    onEvent?.("advisor-failed", {
+    const finish = assembler.finish;
+    if (finish && finish.kind === "error") {
+      return { error: finish.failure?.message ?? "unknown", code: finish.failure?.code, usage, finish, effortSent };
+    }
+    if (finish && finish.kind === "aborted") {
+      return { error: finish.failure?.message ?? "指导调用被中断", code: finish.failure?.code ?? "ABORTED", usage, finish, effortSent };
+    }
+    const raw = assembler
+      .blocks()
+      .filter((block) => block && block.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("\n");
+    return { raw, usage, finish, effortSent };
+  };
+
+  let result = await callOnce(send);
+  // 档位不被支持：只对 auto 做降级（显式档位是配置信号，不擅自换档）。
+  if (result.error && mode === AUTO_EFFORT && isUnsupportedEffortFailure(result)) {
+    onEvent?.("advisor-effort-fallback", {
       provider: route.provider,
       model: route.model,
-      message: timedOut ? `指导调用超时（${timeoutMs} ms）` : String(error?.message ?? error),
-      code: timedOut ? "ADVISOR_TIMEOUT" : error?.code,
+      requested: send,
+      reason: "unsupported",
+      message: result.error,
     });
-    return null;
-  } finally {
-    clearTimeout(timer);
+    const probe = await probeLowEffortForAdvisor({ ctx, route, options, onEvent });
+    const chosen = probe.effort;
+    result = await callOnce(chosen);
+    if (!result.error) rememberEffortPlan(key, chosen);
   }
-  if (timedOut) {
+  clearTimeout(timer);
+
+  if (timedOut || result.code === "ADVISOR_TIMEOUT") {
     onEvent?.("advisor-failed", { provider: route.provider, model: route.model, message: `指导调用超时（${timeoutMs} ms）`, code: "ADVISOR_TIMEOUT" });
     return null;
   }
-  const finish = assembler.finish;
-  if (finish && finish.kind === "error") {
-    onEvent?.("advisor-failed", { provider: route.provider, model: route.model, message: finish.failure?.message ?? "unknown", code: finish.failure?.code });
+  if (result.error) {
+    onEvent?.("advisor-failed", { provider: route.provider, model: route.model, message: result.error, code: result.code });
     return null;
   }
-  // 只取正文块：指导模型常常是思考模型，reasoning 块必须排除，
-  // 否则建议里会混进它的内心独白。
-  const raw = assembler
-    .blocks()
-    .filter((block) => block && block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
-    .join("\n");
+
+  const raw = String(result.raw ?? "").trim();
+  const finish = result.finish;
+  const usage = result.usage;
   // 自测留痕：指导这一路也记下实际 prompt 与正文输出，Log 窗口才能比对两路。
   if (Array.isArray(trace) && trace.length < 8) {
     trace.push({
@@ -182,6 +246,7 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
       usage,
       error: null,
       code: null,
+      effort: result.effortSent ?? null,
     });
   }
   const reasoningTokens = Number(usage?.completion_tokens_details?.reasoning_tokens ?? usage?.reasoning_tokens);
@@ -191,15 +256,15 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
     model: route.model,
     finish: finish?.kind ?? null,
     truncated: finish?.kind === "max-tokens",
-    charsOut: raw.trim().length,
+    charsOut: raw.length,
+    effort: result.effortSent ?? null,
     ...(Number.isFinite(completionTokens) ? { completionTokens } : {}),
     ...(Number.isFinite(reasoningTokens) ? { reasoningTokens } : {}),
     ...(Number.isFinite(completionTokens) && completionTokens > 0 && Number.isFinite(reasoningTokens)
       ? { reasoningShare: Number((reasoningTokens / completionTokens).toFixed(2)) }
       : {}),
   });
-  if (!raw.trim()) {
-    // 正文为空有两种：被截断（预算全花在思考上），或模型只想不说。
+  if (!raw) {
     onEvent?.("advisor-skipped", {
       provider: route.provider,
       model: route.model,

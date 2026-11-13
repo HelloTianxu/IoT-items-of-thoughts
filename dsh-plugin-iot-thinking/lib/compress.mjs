@@ -458,6 +458,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       options,
       timeoutMs,
       trace,
+      effort: advisorCfg.effort,
       onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
     }).then((raw) => {
       // 空输出/截断的原因已经由 advise 自己记账（advisor-skipped），这里不再重复。

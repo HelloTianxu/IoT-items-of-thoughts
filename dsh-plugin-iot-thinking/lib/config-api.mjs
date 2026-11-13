@@ -325,6 +325,10 @@ function sanitize(payload) {
       if (model !== undefined) nextRoute.model = model;
       if (Object.keys(nextRoute).length) out.route = nextRoute;
     }
+    if (raw.effort !== undefined) {
+      const effort = normalizeEffort(raw.effort);
+      if (effort !== null) out.effort = effort;
+    }
     for (const key of ["timeoutMs", "maxAdvice", "maxChars"]) {
       if (Number.isFinite(raw[key])) out[key] = Math.floor(raw[key]);
     }

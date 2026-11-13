@@ -1892,6 +1892,64 @@ await check("指导层：调用失败不影响压缩结果", async () => {
   assert.equal(result.advice ?? null, null);
 });
 
+await check("指导档位：显式档位原样发出；auto 被拒时降级并记账", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push(options.reasoningEffort ?? null);
+        // 这个假路由只认「不发字段」：任何显式档位都被拒。
+        if (options.reasoningEffort !== undefined && options.reasoningEffort !== null) {
+          return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "does not support reasoning effort", code: "INVALID_REQUEST" } } }]);
+        }
+        return chunks([{ type: "text-delta", index: 0, text: "[指导] 先补测试。" }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const raw = await advise({
+    ctx,
+    Llm: fakeLlm(),
+    route: { provider: "p", model: "m" },
+    prompt: "评审",
+    options: {},
+    timeoutMs: 5000,
+    effort: "auto",
+    onEvent: (event, fields) => events.push({ event, ...fields }),
+  });
+  assert.equal(raw, "[指导] 先补测试。", "降级后拿到正文");
+  assert.equal(calls.length, 2, "auto 先试 off，被拒后再发一次");
+  assert.equal(calls[0], "off");
+  assert.ok(events.some((entry) => entry.event === "advisor-effort-fallback"));
+});
+
+await check("指导档位：显式档位被拒时不擅自换档", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push(options.reasoningEffort ?? null);
+        return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "does not support reasoning effort", code: "INVALID_REQUEST" } } }]);
+      },
+    },
+  };
+  const raw = await advise({
+    ctx,
+    Llm: fakeLlm(),
+    route: { provider: "p", model: "m2" },
+    prompt: "评审",
+    options: {},
+    timeoutMs: 5000,
+    effort: "medium",
+    onEvent: (event, fields) => events.push({ event, ...fields }),
+  });
+  assert.equal(raw, null);
+  assert.equal(calls.length, 1, "显式档位只发一次");
+  assert.equal(calls[0], "medium");
+  assert.ok(events.some((entry) => entry.event === "advisor-failed"));
+});
+
 await check("指导调用只取正文：思考模型的 reasoning 块不混进建议", async () => {
   const events = [];
   const ctx = {
