@@ -36,8 +36,16 @@ export async function* transformStream(source, options, deps) {
     return;
   }
 
-  if (!cfg?.enabled || !deps.shouldTransform(options)) {
-    yield* source;
+  const agentRequest = deps.shouldTransform(options);
+  if (!cfg?.enabled || !agentRequest) {
+    // 压缩 off 仍可单独咨询教师：只推进冷却，不缓冲/改写/注入建议。
+    // teacherActive 由入口用原始全局总闸计算，不把 off 的 resolved.enabled 当总闸。
+    if (agentRequest && cfg?.teacherActive === true && cfg.strategy === "off") {
+      for await (const chunk of source) {
+        if (chunk?.type === "block-end" && chunk.block?.type === "reasoning") noteBlock(options?.sessionId);
+        yield chunk;
+      }
+    } else yield* source;
     return;
   }
 

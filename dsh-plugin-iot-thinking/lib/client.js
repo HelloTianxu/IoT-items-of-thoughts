@@ -1866,16 +1866,20 @@ window.__ModuleLoader__.load({
         // 让"档位"与"规格"两件事在落盘时就分开。
         const isCustom = raw !== null && String(raw).startsWith("custom");
         const choice = {
-          strategy: isCustom ? "custom" : raw,
-          preset: isCustom
-            ? (preset || (String(raw).startsWith("custom:") ? String(raw).slice("custom:".length) : null))
-            : null,
+          // undefined = 不改档位；null = 显式清除覆盖。不能在归一化时混为一谈。
+          ...(strategy === undefined ? {} : {
+            strategy: isCustom ? "custom" : raw,
+            preset: isCustom
+              ? (preset || (String(raw).startsWith("custom:") ? String(raw).slice("custom:".length) : null))
+              : null,
+          }),
           // 指导选择与档位一起记住：新会话第一条消息落盘时不能丢。
           ...(guidance === undefined ? {} : { guidance }),
           ...extra,
         };
         if (!sessionId) {
-          setPending(choice);
+          // 新会话连续选择档位/教师时合并独立字段，不丢掉之前尚未落盘的选择。
+          setPending((previous) => ({ ...(previous ?? {}), ...choice }));
           return;
         }
         put(choice);

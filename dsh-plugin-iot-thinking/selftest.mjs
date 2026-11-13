@@ -1563,6 +1563,99 @@ await check("预设选择：切到自定义档位时不能沿用旧档位的值�
   assert.equal(client.composeTier("iot-full", "custom:mine", first), "iot-full", "非 custom 档位原样返回");
 });
 
+/** 驱动真实头部回调，而不是绕过客户端直接测试 PUT。 */
+function mountStrategySeat(initial, fetch) {
+  let definition;
+  const states = [initial, null, false];
+  let cursor = 0;
+  const effects = [];
+  const react = {
+    useState(value) {
+      const index = cursor++;
+      if (!(index in states)) states[index] = value;
+      return [states[index], (next) => { states[index] = typeof next === "function" ? next(states[index]) : next; }];
+    },
+    useEffect: (effect) => { effects.push(effect); },
+    useRef: () => ({ current: true }),
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+  };
+  vm.runInNewContext(readFileSync(new URL("./lib/client.js", import.meta.url), "utf8"), {
+    window: { __ModuleLoader__: { load: (value) => { definition = value; } } }, fetch, console,
+  });
+  const client = definition.factory((name) => name === "react" ? react : {});
+  return {
+    states,
+    effects,
+    render(sessionId) {
+      cursor = 0;
+      effects.length = 0;
+      const tree = client.IotStrategySeat({ sessionId });
+      const selects = [];
+      const walk = (node) => {
+        if (!node || typeof node !== "object") return;
+        if (node.type === "select") selects.push(node);
+        for (const child of node.children ?? []) walk(child);
+      };
+      walk(tree);
+      return selects;
+    },
+  };
+}
+
+await check("真实教师下拉：开/关/跟随只改教师，保留关闭档位与自定义规格", async () => {
+  for (const original of ["off", { strategy: "custom", preset: "builtin:deep", guidance: { enabled: false } }]) {
+    for (const value of ["on", "off", "follow"]) {
+      const ws = fakeWebServer();
+      const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-teacher-ui-")), "config.json"));
+      store.save({ strategy: "iot-full", sessionSwitch: true, sessions: { s: original } });
+      registerConfigApi(testCtx(ws), store);
+      const before = await ws.call("/iot-thinking/api/session", { url: "/iot-thinking/api/session?sessionId=s" });
+      const requests = [], pending = [];
+      const seat = mountStrategySeat(before.payload, (url, options) => {
+        requests.push(JSON.parse(options.body));
+        const promise = ws.call(url, { method: options.method, body: options.body })
+          .then((response) => ({ ok: response.statusCode === 200, json: async () => response.payload }));
+        pending.push(promise);
+        return promise;
+      });
+      const teacher = seat.render("s").find((select) => select.props.title?.includes("教师开关"));
+      assert.ok(teacher);
+      teacher.props.onChange({ target: { value } });
+      await Promise.all(pending);
+      assert.equal(Object.hasOwn(requests[0], "strategy"), false, "教师回调必须省略 strategy，不是传 null");
+      assert.equal(Object.hasOwn(requests[0], "preset"), false);
+      const after = await ws.call("/iot-thinking/api/session", { url: "/iot-thinking/api/session?sessionId=s" });
+      assert.equal(after.payload.route.id, before.payload.route.id);
+      assert.equal(after.payload.enabled, before.payload.enabled);
+      if (typeof original === "object") {
+        assert.equal(after.payload.override.preset, original.preset);
+        assert.deepEqual(after.payload.override.guidance, original.guidance);
+      }
+    }
+  }
+});
+
+await check("新会话教师选择：与待落盘档位合并，显式清除档位仍发送 null", async () => {
+  const requests = [];
+  const seat = mountStrategySeat({ sessionSwitch: true, route: { id: "iot-full" } }, async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return { ok: true, json: async () => ({}) };
+  });
+  let selects = seat.render(undefined);
+  selects[0].props.onChange({ target: { value: "off" } });
+  selects = seat.render(undefined);
+  selects.find((select) => select.props.title?.includes("教师开关")).props.onChange({ target: { value: "on" } });
+  assert.equal(seat.states[1].strategy, "off");
+  assert.equal(seat.states[1].teacher.enabled, true);
+  seat.render("new-session");
+  seat.effects[seat.effects.length - 1](); // sessionId 出现后落盘 pending
+  assert.equal(requests[0].strategy, "off");
+  assert.deepEqual(requests[0].teacher, { enabled: true });
+  selects = seat.render("new-session");
+  selects[0].props.onChange({ target: { value: "" } });
+  assert.equal(requests[1].strategy, null, "用户明确选择跟随默认仍可清除档位");
+});
+
 await check("预设冲突：defaultPreset 只在 custom 档位生效，别的档位静默忽略", () => {
   const items = resolveConfig({ strategy: "iot-balanced", defaultPreset: "builtin:standard" }, { sessionId: "s" });
   assert.equal(items.strategy, "iot-balanced");

@@ -251,6 +251,8 @@ export async function consultTeacher({
   temperature,
   trace,
 }) {
+  // Caller cancellation is not a failed consultation or a successful partial answer.
+  options?.signal?.throwIfAborted();
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const signal = combineSignals(controller?.signal, options?.signal);
   const deadline = Date.now() + Math.max(1, timeoutMs);
@@ -276,6 +278,7 @@ export async function consultTeacher({
         ...(signal === undefined ? {} : { signal }),
       });
       for await (const chunk of stream) {
+        signal?.throwIfAborted();
         if (chunk?.type === "usage") usage = chunk?.usage ?? chunk;
         assembler.push(chunk);
       }
@@ -301,12 +304,23 @@ export async function consultTeacher({
   const timeout = new Promise((resolve) => {
     timer = setTimeout(() => resolve({ error: `教师咨询超时（${timeoutMs} ms）`, code: "TEACHER_TIMEOUT" }), ms);
   });
+  let onAbort;
+  const cancelled = new Promise((_, reject) => {
+    onAbort = () => {
+      controller?.abort(options.signal.reason);
+      reject(options.signal.reason ?? new DOMException("教师咨询已取消", "AbortError"));
+    };
+    if (options?.signal?.aborted) onAbort();
+    else options?.signal?.addEventListener("abort", onAbort, { once: true });
+  });
   let result;
   try {
     const consumed = consume().catch((error) => ({ error: describeError(error), code: errorCodeOf(error) }));
-    result = await Promise.race([consumed, timeout]);
+    result = await Promise.race([consumed, timeout, cancelled]);
+    options?.signal?.throwIfAborted();
   } finally {
     clearTimeout(timer);
+    options?.signal?.removeEventListener("abort", onAbort);
     controller?.abort?.();
   }
 

@@ -5,6 +5,7 @@
 import { importSeam } from "./lib/seams.mjs";
 import { ConfigStore, defaultConfigPath } from "./lib/config-store.mjs";
 import { compressThinking } from "./lib/compress.mjs";
+import { resolveAdvisorRoute } from "./lib/advisor.mjs";
 import { registerConfigApi } from "./lib/config-api.mjs";
 import { archiveOriginal, mark } from "./lib/ledger.mjs";
 import { resolveConfig } from "./lib/route.mjs";
@@ -114,7 +115,8 @@ export function apply(ctx, config = {}) {
     const getConfig = () => {
       const cfg = store.load();
       if (cfg.enabled === false) return cfg;
-      return resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
+      const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
+      return { ...resolved, teacherActive: cfg.enabled !== false && resolved.teacher?.enabled === true };
     };
 
     return transformStream(source, options, {
@@ -139,22 +141,22 @@ export function apply(ctx, config = {}) {
 
   // 教师咨询工具：由**正在做这件事的模型**主动调用，插件只提供骨架、上下文与冷却闸门。
   // tools 服务在 web 组合里有；缺失时不报错，插件其余部分照常工作。
+  // 共用解析：总闸关闭时教师也关闭；压缩档位 off 不影响独立教师工具。
+  const teacherConfigFor = (execution) => {
+    const cfg = store.load();
+    const sessionId = sessionIdOf(execution);
+    const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
+    return { cfg, sessionId, resolved, teacher: resolved.teacher ?? {}, enabled: cfg.enabled !== false && resolved.teacher?.enabled === true };
+  };
+  const teacherLimits = (teacherCfg) => ({
+    ...TEACHER_LIMITS,
+    cooldownBlocks: teacherCfg.cooldownBlocks ?? TEACHER_LIMITS.cooldownBlocks,
+    inputBudget: teacherCfg.inputBudget ?? TEACHER_LIMITS.inputBudget,
+    maxTokens: teacherCfg.maxTokens ?? TEACHER_LIMITS.maxTokens,
+    minDepth: teacherCfg.depthRange?.[0] ?? TEACHER_LIMITS.minDepth,
+    maxDepth: teacherCfg.depthRange?.[1] ?? TEACHER_LIMITS.maxDepth,
+  });
   const teacherTool = () => {
-    const cfgNow = store.load();
-    const teacherCfg = cfgNow.advisor?.teacher && typeof cfgNow.advisor.teacher === "object" ? cfgNow.advisor.teacher : {};
-    const limits = {
-      ...TEACHER_LIMITS,
-      ...(Number.isFinite(teacherCfg.cooldownBlocks) ? { cooldownBlocks: Math.max(0, Math.floor(teacherCfg.cooldownBlocks)) } : {}),
-      ...(Number.isFinite(teacherCfg.inputBudget) ? { inputBudget: Math.max(1000, Math.floor(teacherCfg.inputBudget)) } : {}),
-      ...(Number.isFinite(teacherCfg.maxTokens) ? { maxTokens: Math.max(200, Math.floor(teacherCfg.maxTokens)) } : {}),
-      ...(Array.isArray(teacherCfg.depthRange) && teacherCfg.depthRange.length === 2
-        ? {
-            minDepth: Math.max(1, Math.floor(teacherCfg.depthRange[0])),
-            maxDepth: Math.max(1, Math.floor(teacherCfg.depthRange[1])),
-          }
-        : {}),
-    };
-
     return defineTool({
       name: "iot_consult_teacher",
       description: [
@@ -200,13 +202,13 @@ export function apply(ctx, config = {}) {
             remainingBlocks: { type: "number" },
           },
         },
-        render: (_args, value) => (value?.text ? String(value.text) : String(value?.reason ?? "教师没有返回内容")),
+        render: (_args, value) => [{ type: "text", text: value?.text ? String(value.text) : String(value?.reason ?? "教师没有返回内容") }],
       },
       async execute(args, exec) {
-        const cfg = store.load();
-        const teacher = cfg.advisor?.teacher && typeof cfg.advisor.teacher === "object" ? cfg.advisor.teacher : {};
-        const sessionId = sessionIdOf(exec);
-        if (teacher.enabled !== true) {
+        exec?.signal?.throwIfAborted();
+        const { cfg, sessionId, resolved, teacher, enabled } = teacherConfigFor(exec);
+        const limits = teacherLimits(teacher);
+        if (!enabled) {
           return { ok: false, reason: "教师咨询未启用（在设置卡里打开「教师增强」）", available: false };
         }
         // 冷却闸门是**硬约束**：不只是提示，冷却中直接拒绝。
@@ -214,7 +216,6 @@ export function apply(ctx, config = {}) {
           const status = teacherStatus(sessionId, limits);
           return { ok: false, reason: `教师冷却中（还需 ${status.remainingBlocks} 块）`, available: false, remainingBlocks: status.remainingBlocks };
         }
-        const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
         const route = resolveAdvisorRoute(cfg, resolved.strategy, lastRoute);
         if (!route?.provider || !route?.model) {
           return { ok: false, reason: "没有可用的教师路由：在设置卡里指定建议模型，或先在本会话发一条消息" };
@@ -238,12 +239,13 @@ export function apply(ctx, config = {}) {
           Llm,
           route,
           prompt,
-          options: { sessionId },
+          options: { sessionId, signal: exec?.signal },
           timeoutMs: Math.max(3000, Math.min(120000, Number(teacher.timeoutMs) || 30000)),
           maxTokens: limits.maxTokens,
           effort: cfg.advisor?.effort,
           temperature: cfg.advisor?.temperature,
         });
+        exec?.signal?.throwIfAborted();
         if (!result.ok) {
           mark("teacher-failed", { sessionId, provider: route.provider, model: route.model, code: result.code, message: result.error, depth, rounds: rounds.length });
           return { ok: false, reason: result.error, provider: route.provider, model: route.model };
@@ -275,6 +277,7 @@ export function apply(ctx, config = {}) {
   };
 
   ctx.inject(["tools"], (toolCtx) => {
+    // 保持工具声明稳定，避免会话开关改变 prompt 前缀；未启用由 execute 本地立即拒绝。
     const unregister = toolCtx.tools.register(teacherTool());
     mark("teacher-tool-registered", { name: "iot_consult_teacher" });
     return () => unregister();

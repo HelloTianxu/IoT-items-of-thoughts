@@ -254,6 +254,11 @@ CD 按**块**计量，只暴露冷却、不暴露总额（避免"不用白不用
 
 **全局默认 + 会话开关**：设置卡里有全局开关；每个会话还能单独覆盖（会话覆盖表 / 对话头部下拉）。
 全局没开时会话也能勾上——只影响那个会话。会话只能改开关，冷却/深度/预算仍走全局。
+教师选择只修改教师字段，不修改压缩档位、自定义规格或指导开关；新会话中连续选择也会合并保留。
+工具定义始终稳定保留在列表中，不随会话开关增删，避免影响提示词前缀缓存。
+未启用的会话如果调用工具，会在执行入口按有效配置立即返回拒绝，不查教师路由、不提取历史、不调用外部模型。
+插件总闸 `enabled:false` 会禁用教师；压缩档位 `off` 与教师开关独立，教师开启时仍可主动咨询。
+“已添加工具”仅表示工具列表变化，不代表已经调用教师。
 
 ```jsonc
 "sessions": {
@@ -443,7 +448,8 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 ## 自测
 
 ```powershell
-node selftest.mjs   # 纯逻辑
+node selftest.mjs   # 纯逻辑 + 真实头部回调/API 回归
+node --experimental-vm-modules teacher-entry-test.mjs # 原始教师入口、开关、预算、取消、输出契约（离线）
 node smoke.mjs      # 接线（需要盘上有 dsh 安装来解析 seam；找不到时设 IOT_DSH_SEAM_ANCHORS）
 ```
 
