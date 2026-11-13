@@ -736,7 +736,25 @@ window.__ModuleLoader__.load({
         : [...catalog, ...STRATEGY_FALLBACK.filter((entry) => !catalog.some((known) => known.id === entry.id))]
             .map((entry) => ({ value: entry.id, label: entry.label, isCustom: entry.family === "custom" }));
       const presetChoices = Array.isArray(choices.presets) ? choices.presets : [];
-      const tierOf = (value) => (typeof value === "string" && value.startsWith("custom") ? "custom" : value);
+      // 注入候选：空（不注入）+ 内置预设 + 贴入文本 + 目录文件。
+      const injectChoices = Array.isArray(choices.injects) ? choices.injects : [{ value: "", label: "不注入", kind: "none" }];
+      // 旧配置（strategy=custom）迁移后的注入值：让选择器能回显当前生效的注入。
+      const legacyInjectOf = (strategy, defaultPreset) => {
+        const raw = typeof strategy === "string" ? strategy : "";
+        if (raw === "custom" || raw.startsWith("custom:")) {
+          if (raw.startsWith("custom:")) return raw;
+          return typeof defaultPreset === "string" && defaultPreset ? defaultPreset : (String(cfg.customText ?? "").trim() ? "inline" : "");
+        }
+        if (raw.startsWith("builtin:")) return raw;
+        return "";
+      };
+      const activeInject = String(cfg.inject ?? "").trim() || legacyInjectOf(cfg.strategy, cfg.defaultPreset);
+      // 旧 `custom` 档已迁移成「完整档 + 用户注入」：下拉里不再有它，值也归一成 iot-full。
+      const tierOf = (value) => {
+        const raw = typeof value === "string" ? value : "";
+        if (raw === "custom" || raw.startsWith("custom:") || raw.startsWith("builtin:")) return "iot-full";
+        return raw;
+      };
       const targetOf = (value) => (typeof value === "string" && value.startsWith("custom:") ? value : "custom");
       const firstCustom = () => (presetChoices[0] ? presetChoices[0].value : "custom");
       // 切到"自定义预设"时给一个真实可用值：原来的 target 不是具体文件就用第一个文件。
@@ -826,42 +844,38 @@ window.__ModuleLoader__.load({
           h("div", { style: { ...hint, color: "inherit", marginTop: 4 } }, "改写失败会按设计保留原文，界面上只表现为「没效果」。修好路由或档位后再点「一键测试」。")
         ) : null,
 
-        // ── 默认档位 ────────────────────────────────────────────────────────
+        // ── 压缩强度 + 用户注入（两个正交维度，分开选） ──────────────────────
         h("div", { style: section },
           h("div", { style: sectionHead },
-            h("div", { style: sectionTitle }, "默认档位"),
+            h("div", { style: sectionTitle }, "压缩强度"),
             h("span", { style: hint }, "没被 preset / 会话覆盖时用这一档")
           ),
           h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" } },
             h("select", {
               value: tierOf(activeId),
               style: { ...input, flex: "0 0 260px", padding: "6px 8px" },
-              onChange: (e) => set({ strategy: compose(e.target.value, targetOf(activeId)) }),
+              onChange: (e) => set({ strategy: e.target.value }),
             },
               ...tiers.map((entry) => h("option", { key: entry.value, value: entry.value }, entry.label))
             ),
-            tierOf(activeId) === "custom"
-              ? h("select", {
-                  value: activePresetValue,
-                  title: "这份规格是全局默认：会话没单独选时用它。内置预设只读；目录文件可编辑。",
-                  style: { ...input, flex: "0 0 240px", padding: "6px 8px" },
-                  onChange: (e) => {
-                    const value = e.target.value;
-                    // 内置预设写成 defaultPreset（只读、不占 strategy 的名字空间）；
-                    // 文件/贴入文本仍沿用 `custom[:名字]` 的老写法。
-                    set(value.startsWith("builtin:")
-                      ? { strategy: "custom", defaultPreset: value }
-                      : { strategy: value, defaultPreset: null });
-                  },
-                },
-                  ...(presetChoices.length
-                    ? presetChoices.map((entry) => h("option", { key: entry.value, value: entry.value }, entry.label))
-                    : [h("option", { key: "custom", value: "custom" }, "贴入的文本（未建任何预设文件）")])
-                )
-              : null,
             h("span", { style: { ...hint, minWidth: 0, flex: "1 1 100%" } }, active ? active.summary : "")
           ),
-          tierOf(activeId) === "custom" && presetChoices.length === 0
+          // 用户注入：叠加层，追加在内置提示词后面，只能补充标签规则。
+          h("div", { style: { display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" } },
+            h("span", { style: { ...hint, flex: "0 0 84px" } }, "用户注入"),
+            h("select", {
+              value: activeInject,
+              title: "追加在内置提示词后面的一层规则：选「不注入」就不加；内置预设只读，目录文件与贴入文本可编辑。",
+              style: { ...input, flex: "0 0 320px", padding: "6px 8px" },
+              onChange: (e) => set({ inject: e.target.value }),
+            },
+              ...injectChoices.map((entry) => h("option", { key: entry.value || "none", value: entry.value }, entry.label))
+            ),
+            h("span", { style: hint }, activeInject ? "已注入" : "不注入")
+          ),
+          h("div", { style: { ...hint, marginTop: 4 } },
+            "注入是**叠加**：内置三档的标签规则不会被替掉，只会在它后面追加这段要求。想整段替换提示词就用下面「用户配置」里的预设（旧行为，等价于把注入指向那份文本）。"),
+          activeInject && injectChoices.length <= 1
             ? h("div", { style: { ...hint, marginTop: 4, color: "#b76e00" } },
                 choices.presetDirSet ? "目录里还没有预设文件 —— 在「用户配置」里新建一个，或直接用贴入的文本。" : "还没有配置预设目录 —— 只能先用贴入的文本。")
             : null,
@@ -1934,7 +1948,12 @@ window.__ModuleLoader__.load({
         ? state.choices.tiers
         : STRATEGY_FALLBACK.map((entry) => ({ value: entry.id, label: entry.label, isCustom: entry.family === "custom" }));
       const presets = Array.isArray(state?.choices?.presets) ? state.choices.presets : [];
-      const tierOf = (value) => (typeof value === "string" && value.startsWith("custom") ? "custom" : value ?? "");
+      // 旧 `custom` 档已迁移成「完整档 + 用户注入」：归一成 iot-full，下拉里没有 custom。
+      const tierOf = (value) => {
+        const raw = typeof value === "string" ? value : "";
+        if (raw === "custom" || raw.startsWith("custom:") || raw.startsWith("builtin:")) return "iot-full";
+        return raw;
+      };
       const targetOf = (value) => (typeof value === "string" && value.startsWith("custom:") ? value : "custom");
       const selectStyle = {
         padding: "2px 4px",
@@ -1960,10 +1979,8 @@ window.__ModuleLoader__.load({
           onChange: (e) => {
             const tier = e.target.value;
             if (!tier) { choose(null); return; }
-            if (tier !== "custom") { choose(tier); return; }
-            // 切到 custom 时带上一份具体规格：沿用已有的，否则用清单里的第一项。
-            const fallback = current && tierOf(current) === "custom" ? targetOf(current) : presets[0]?.value ?? "custom";
-            choose(fallback, currentPreset || fallback);
+            // 档位下拉只写压缩强度；用户注入是另一维，不在这里改。
+            choose(tier);
           },
         },
           h("option", { value: "" }, presetDefault ? "跟随 preset 默认（" + presetDefault + "）" : "跟随 preset 默认"),
@@ -2008,19 +2025,6 @@ window.__ModuleLoader__.load({
           h("option", { value: "on" }, "开启"),
           h("option", { value: "off" }, "关闭")
         ),
-        current && tierOf(current) === "custom"
-          ? h("select", {
-              value: targetOf(current),
-              disabled: busy,
-              title: "本会话用哪一份规格（内置预设 / 目录里的文件 / 贴入的文本）",
-              style: { ...selectStyle, maxWidth: 190 },
-              onChange: (e) => choose(targetOf(current), e.target.value),
-            },
-              ...(presets.length
-                ? presets.map((entry) => h("option", { key: entry.value, value: entry.value }, entry.label))
-                : [h("option", { key: "custom", value: "custom" }, "贴入的文本")])
-            )
-          : null
       );
     }
 

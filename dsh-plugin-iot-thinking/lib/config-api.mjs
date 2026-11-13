@@ -320,6 +320,8 @@ function sanitize(payload) {
   // 自定义预设三件：目录、贴入的文本、替换规则。
   if (typeof payload.presetDir === "string") next.presetDir = payload.presetDir.trim();
   if (typeof payload.customText === "string") next.customText = payload.customText;
+  // 用户注入：空串 = 不注入；`builtin:<id>` / `custom:<文件名>` / `inline:<文本>` / 裸文本。
+  if (typeof payload.inject === "string") next.inject = payload.inject;
   if (payload.presetAccept === "shorter" || payload.presetAccept === "different") next.presetAccept = payload.presetAccept;
   // 内置预设的用户覆盖：`{ "<id>": "正文" }`；空串 = 恢复默认（删键）。
   if (payload.builtinOverrides !== undefined) {
@@ -510,12 +512,14 @@ function describeEfforts(reasoning) {
  */
 function valueChoices(cfg = {}) {
   const listing = listPresets(cfg.presetDir);
-  const tiers = strategyCatalog().map((entry) => ({
-    value: entry.id,
-    label: entry.label,
-    family: entry.family,
-    isCustom: entry.family === "custom",
-  }));
+  // 压缩强度下拉只放三档 + 关闭：`custom` 不再是档位，而是叠加在提示词后面的用户注入。
+  const tiers = strategyCatalog()
+    .filter((entry) => entry.family !== "custom")
+    .map((entry) => ({
+      value: entry.id,
+      label: entry.label,
+      family: entry.family,
+    }));
   const presets = [];
   // 内置预设排在最前面：多数人没有 presetDir，也不该被要求先写一份文件。
   for (const preset of builtinPresetCatalog()) {
@@ -527,7 +531,13 @@ function valueChoices(cfg = {}) {
   for (const preset of listing.presets) {
     presets.push({ value: `custom:${preset.name}`, label: preset.name, bytes: preset.bytes, kind: "file" });
   }
-  return { tiers, presets, presetDirSet: listing.configured, builtinPresets: builtinPresetCatalog() };
+  // 注入候选：空（不注入）+ 内置预设 + 贴入文本 + 目录文件。
+  // 与 presets 同源，但语义不同 —— 预设是"替代提示词"，注入是"追加一层规则"。
+  const injects = [
+    { value: "", label: "不注入", kind: "none" },
+    ...presets.map((entry) => ({ ...entry, value: entry.kind === "inline" ? "inline" : entry.value })),
+  ];
+  return { tiers, presets, injects, presetDirSet: listing.configured, builtinPresets: builtinPresetCatalog() };
 }
 
 /** 会话 id → agent preset（会话投影里的值）。取不到返回 undefined。 */

@@ -20,6 +20,7 @@ import {
 import { DEFAULT_STRATEGY, limitsOf, strategyById } from "./strategies.mjs";
 import { hasLabel, hasThinkTag } from "./gates.mjs";
 import { ADVISOR_LIMITS, advise, appendAdvice, buildAdvisorPrompt, formatAdvice, resolveAdvisorRoute } from "./advisor.mjs";
+import { injectTextOf } from "./custom.mjs";
 import { adviceMuted } from "./teacher.mjs";
 import { isOffloaded, normalizeRouteTarget, resolveRewriteRoute } from "./route.mjs";
 
@@ -597,14 +598,26 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    * `{ done: false, reason, detail }` 表示"不合格，可以按原因重试一次"。
    */
   const pass = async ({ strict, reason, detail, stage, temperatureForCall }) => {
+    let injectedText = String(cfg.customText ?? "");
+    const injectRaw = String(cfg.inject ?? "").trim();
+    if (injectRaw) {
+      const resolved = injectTextOf(injectRaw, { dir: cfg.presetDir ?? null, builtinOverrides: cfg.builtinOverrides ?? {} });
+      if (resolved.error) {
+        mark("inject-unusable", { index, strategy: strategy.id, value: injectRaw, reason: resolved.error });
+      } else if (resolved.text.trim()) {
+        // 已有用户补充时按"补充在前、注入在后"拼：注入是用户显式选择的规则，放后面更贴近输出要求。
+        injectedText = [injectedText.trim(), resolved.text.trim()].filter(Boolean).join("\n\n");
+      }
+    }
     const instruction = strategy.buildPrompt(text, {
       strict,
       reason,
       detail,
       limits,
       state,
-      // 三档基础模式没有"预设正文"，用贴入的文本充当用户补充层。
-      extraPrompt: cfg.customText ?? "",
+      // 用户注入是叠加层：追加在内置三档的固定提示词后面，只能补充标签规则。
+      // 解析失败不让整块压缩失败 —— 降级为无注入并记账，原文仍按档位改写。
+      extraPrompt: injectedText,
       // 内置建议模式：让压缩器自己在输出里加 [旁观者建议]。
       allowAdvice: guidanceOn && guidance.mode === "builtin",
     });

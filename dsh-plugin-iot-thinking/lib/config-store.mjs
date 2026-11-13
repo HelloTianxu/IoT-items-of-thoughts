@@ -117,6 +117,12 @@ export const DEFAULTS = Object.freeze({
   // 自定义预设：目录必须显式配置（空 = 没有目录，文件类预设不可用）。
   presetDir: "",
   customText: "",
+  /**
+   * 用户注入（叠加层）：追加到内置三档的固定提示词后面，只能补充标签规则。
+   * 空串 = 不注入。值域与自定义预设一致：`builtin:<id>` / `custom:<文件名>` / `inline:<文本>`。
+   * 与 customText 分开：customText 是"贴入的文本"这一种来源，inject 可以指向任意来源。
+   */
+  inject: "",
   presetAccept: "different",
   // 旧字段，只读兼容：迁移后不再写回，但保留在主键集合里，避免旧文件被"清空"。
   // 只对 items 家族兜底，别让旧档位的数字盖掉当前档位自己的默认值。

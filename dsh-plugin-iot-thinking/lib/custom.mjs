@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { basename, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { INSTRUCTIONS, outputDiscipline } from "./think.mjs";
+import { builtinPresetById, builtinPresetText } from "./builtin-presets.mjs";
 
 const TEXT_EXTENSIONS = new Set([".md", ".txt", ".markdown"]);
 
@@ -140,6 +141,41 @@ export function resetPresetCache() {
  * 压缩而不是在继续思考"的唯一可机检信号。预设里写 `{{draft}}` 时，标签层
  * 仍然放在最前面，草稿填在预设正文的位置。
  */
+/**
+ * 把"用户注入"的值解析成文本。
+ *
+ * 值域与自定义预设一致，但语义不同：自定义预设是**替代**内置提示词，
+ * 用户注入是**追加**在内置提示词后面的一层。同一个来源（内置预设/目录文件/贴入文本）
+ * 可以既被当预设、又被当注入 —— 解析函数只负责取文本，不替调用方决定怎么用。
+ *
+ * 出错时返回 `{ text: "", error }`，由调用方决定是降级还是报错。
+ */
+export function injectTextOf(value, { dir = null, builtinOverrides = {} } = {}) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return { text: "", error: null };
+  if (raw.startsWith("builtin:")) {
+    const id = raw.slice("builtin:".length).trim();
+    if (!id) return { text: "", error: "inject 指向内置预设但没写 id" };
+    const preset = builtinPresetById(id);
+    if (!preset) return { text: "", error: `没有这个内置预设：${id}` };
+    return { text: builtinPresetText(preset.id, builtinOverrides), error: null };
+  }
+  if (raw.startsWith("inline:")) {
+    const text = raw.slice("inline:".length).trim();
+    return { text, error: text ? null : "inject 是 inline 但正文为空" };
+  }
+  if (raw.startsWith("custom:")) {
+    const name = raw.slice("custom:".length).trim();
+    if (!name) return { text: "", error: "inject 指向目录预设但没写文件名" };
+    if (!dir) return { text: "", error: "还没设置预设目录" };
+    const loaded = readPreset(dir, name);
+    if (loaded.error) return { text: "", error: loaded.error === "preset-dir-not-set" ? "还没设置预设目录" : loaded.error };
+    return { text: loaded.text, error: null };
+  }
+  // 裸文本：直接当注入正文（方便脚本与手写配置）。
+  return { text: raw, error: null };
+}
+
 export function buildCustomPrompt(presetText, draft, { strict = false, reason = null, detail = null, limits = null, allowAdvice = false } = {}) {
   const body = String(presetText ?? "").trim();
   const text = String(draft ?? "");

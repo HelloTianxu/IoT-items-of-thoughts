@@ -144,9 +144,14 @@ export function resolveRoute(cfg, who = {}) {
 export function resolveConfig(cfg, who = {}) {
   const base = cfg && typeof cfg === "object" ? cfg : {};
   const route = resolveRoute(base, who);
-  const strategy = strategyById(route.id) ?? strategyById(DEFAULT_STRATEGY);
-  const overrides = base.strategies && typeof base.strategies === "object" ? base.strategies[route.id] : undefined;
-  const limits = limitsOf(route.id, overrides, base);
+  // 旧 `custom` 档已迁移成「完整档 + 用户注入」：档位下拉里不再有它。
+  // 保留运行时兼容 —— 老配置、老会话覆盖、老 preset 映射读到 custom 仍能工作，
+  // 只是行为从"替代内置提示词"变成"追加在内置提示词后面"。
+  const legacyCustom = route.id === "custom";
+  const effectiveId = legacyCustom ? "iot-full" : route.id;
+  const strategy = strategyById(effectiveId) ?? strategyById(DEFAULT_STRATEGY);
+  const overrides = base.strategies && typeof base.strategies === "object" ? base.strategies[effectiveId] : undefined;
+  const limits = limitsOf(effectiveId, overrides, base);
 
   if (route.id === "custom") {
     if (route.builtin) {
@@ -241,13 +246,29 @@ export function resolveConfig(cfg, who = {}) {
       : globalTeacher?.enabled === true;
   const teacher = { ...(globalTeacher ?? {}), enabled: teacherEnabled };
 
+  // 用户注入（叠加层）：这里只透传值，不读文件 —— 配置解析不该有 IO。
+  // 文本由 compress 在 prepare 阶段解析，失败时降级为"无注入"并记账。
+  // 旧 custom 档的预设就是它的注入来源：迁移后行为一致（内容仍然生效，只是从替代变追加）。
+  let inject = typeof base.inject === "string" ? base.inject.trim() : "";
+  if (!inject && legacyCustom) {
+    // 从已解析的 preset 描述反推注入值：custom 档的三个分支（内置预设/目录文件/贴入文本）
+    // 都写进了 limits.preset，直接读它比再走一遍 route 分支更可靠。
+    const preset = limits.preset;
+    if (preset?.kind === "builtin" || preset?.builtin) inject = `builtin:${preset.name ?? preset.builtin}`;
+    else if (preset?.inline !== undefined) inject = String(preset.inline ?? "").trim() ? `inline:${preset.inline}` : "";
+    else if (preset?.name) inject = `custom:${preset.name}`;
+    else if (String(base.customText ?? "").trim()) inject = `inline:${base.customText}`;
+  }
+
   const off = strategy?.family === "off";
   return {
     ...base,
-    strategy: route.id,
+    // 迁移后的实际档位：旧 custom 折叠成 iot-full（route 里保留原 id 便于诊断）。
+    strategy: effectiveId,
     route,
     guidance,
     teacher,
+    inject,
     limits,
     minChars: Number.isFinite(limits.minChars) ? Math.max(0, limits.minChars) : 0,
     maxChars: Number.isFinite(limits.maxChars) ? Math.max(1, limits.maxChars) : 24000,

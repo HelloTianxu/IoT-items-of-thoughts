@@ -75,7 +75,7 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 |---|---|
 | 对话顶部下拉 | 这个会话用哪一档（写 `sessions[sessionId]`）。**默认不显示**，要在卡片里打开「会话级档位」；打开后新会话也有：先记住选择，等会话出现（发第一条消息）时自动落盘 |
 | 会话内 `/iot <档位>` | 同上；`/iot custom:<文件名>` 指定自定义预设；`/iot auto` 清除覆盖。**始终可用**，不受上面那个开关影响 |
-| 设置卡（设置 → 插件 → IoT 思考改写） | 全局默认、逐档限制、按 agent preset 映射、"第 4 项"预设的目录与内容 |
+| 设置卡（设置 → 插件 → IoT 思考改写） | 压缩强度、用户注入、逐档限制、按 agent preset 映射、用户配置的目录与内容 |
 
 优先级：**会话自己的选择 > agent preset 行 > 全局默认**。
 
@@ -91,7 +91,7 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 | --- | --- | --- |
 | **压缩强度** | 极简 / 均衡 / 完整 / 关闭 | 决定压缩后保留多少标签与节点 |
 | **建议** | 关闭 / 内置 / 外部 | 内置 = 压缩器自己多输出 1~2 条 `[旁观者建议]`；外部 = 另发一路强模型 |
-| **用户补充** | 任意文本（可空） | 追加在插件固定提示词**后面**的一层，只能补充，不能替掉标签规则 |
+| **用户注入** | 不注入 / 内置预设 / 目录文件 / 贴入文本 | 追加在插件固定提示词**后面**的一层，只能补充，不能替掉标签规则 |
 
 所以「压缩 · 完整 + 内置建议」= 8 标签压缩 + 压缩器顺带给出建议；「压缩 · 完整 + 外部建议」=
 8 标签压缩 + 另发一路强模型给建议。**这是组合，不是两个档位。**
@@ -99,8 +99,18 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 旧档位 `iot-guided` 已折叠成别名：它等价于「压缩 · 完整 + 内置建议」。读到旧值仍能工作
 （全局、会话覆盖、preset 映射里写了都一样），但界面上不再出现这个档位——同一件事只留一种表达。
 
-「用户配置」（原「自定义预设」）不是第四档压缩：它是用你的整段文本**替代**内置提示词。
-三档内置压缩用的是插件固定提示词，**用户补充**才是叠加层。两者别混用。
+旧档位 `custom` 也不再是第四档：它迁移成「压缩 · 完整 + 用户注入」。老配置、老会话覆盖、
+老 preset 映射里写了 `custom` 仍能工作，内容（内置预设 / 目录文件 / 贴入文本）继续生效，
+但语义从"替代内置提示词"变成"追加在它后面"。**注入是叠加，不是替代。**
+
+`off` 档不调用改写模型，所以注入在那时**不生效**——这是 off 的定义，不是 bug。
+
+```jsonc
+"inject": ""                       // 不注入
+"inject": "builtin:standard"       // 内置预设
+"inject": "custom:my-style.md"     // 目录里的文件
+"inject": "inline:<你的文本>"      // 直接贴一段
+```
 
 ## 用户配置（自定义预设）
 
@@ -155,9 +165,9 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 `builtinOverrides` 里，随时能「恢复默认」；没改时用插件自带文本。
 内置预设的替换规则固定为 `shorter` —— 一条不比原文短的输出不该替换掉整块 thinking。
 
-点「用这个」会同时把默认档位切到「自定义预设」并写入 `defaultPreset`；
+点「用这个」会把它写成「用户注入」并写入 `defaultPreset`；
 全局默认预设只在 custom 档位、且没有会话/preset 映射覆盖时生效 —— 档位不是
-自定义预设时，`defaultPreset` 会被静默忽略（这是配置层的既有语义，不是 bug）。
+用户注入时，`defaultPreset` 会被静默忽略（这是配置层的既有语义，不是 bug）。
 
 ⚠️ 已知坑（已修）：旧版设置卡从别的档位切到「自定义预设」时会沿用旧档位的值
 （`targetOf("iot-balanced")` 返回 `"iot-balanced"`），结果 `strategy` 没切过去，
@@ -174,7 +184,7 @@ sessions: {
 }
 ```
 
-- 头部下拉：选「自定义预设」后出现第二个下拉（规格），两者一起落盘。
+- 头部下拉只放压缩强度与建议；用户注入在设置卡里选（它是全局叠加层，不按会话分）。
 - `/iot preset:<名字>`：内置预设优先；没命中就当目录里的文件名。
 - `/iot custom:<文件名>` 仍然可用，等价于 `preset: "custom:<文件名>"`。
 - 旧形态 `"custom:名字"` 字符串仍读得懂；新写入统一成对象形态。
@@ -409,7 +419,7 @@ node show.mjs --presets                  # agent preset 的声明与组成（读
 > `$DSH_HOME/.agent-presets/` 是旧的目录式来源，运行时不读它。
 
 ⚠️ 别把两个"preset"搞混：**agent preset** 是会话的插件组合（standard / jingjing…），
-本插件只能引用它；**改写预设**是本插件自己的那份文本（第 4 项）。
+本插件只能引用它；**改写预设**是本插件自己的那份文本（用户注入 / 用户配置）。
 
 ## 账本与事件
 
@@ -423,13 +433,13 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 事件：`constructed`、`block-replaced`、`block-kept`、`block-skipped`、`block-failed`、
 `thinking-rewritten`、`thinking-failed`、`thinking-skipped`（`reason: "aborted"` 表示是你
 自己按了 Esc，不是插件出错）、`thinking-degenerate`（基础三档的输出被拒 / 兜底 / 输入已循环）、
-`thinking-rejected`（自定义预设被拒）、`thinking-effort-fallback`、
+`thinking-rejected`（用户配置被拒）、`thinking-effort-fallback`、
 `thinking-effort-unsupported`、`thinking-effort-probe-failed`、`thinking-self-test`、
 `strategy-switched`（会话内切换）、`rewrite-route`（本次改写发往哪条路由、是否卸载）、
 `rewrite-route-fallback`（卸载路由失败后回退到会话路由）。
 
 每条改写事件都带 `strategy`；`block-replaced` 还带形态学指标（基础三档 `nodes`，
-自定义预设 `lines` / `fragmentRate`）。统计收益请用 `block-replaced`，不要用
+用户配置 `lines` / `fragmentRate`）。统计收益请用 `block-replaced`，不要用
 `thinking-rewritten` 求和（后者含被拒的块）。要确认"压缩真的卸载到了别的模型"，
 看 `rewrite-route` 的 `source`/`offloaded`，以及 `block-replaced` 里的 `provider`/`model`。
 
@@ -450,10 +460,10 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sessionId>/<time>-block<index>.txt
 | `lib/stream.mjs` | 纯 chunk 转换器（扣住 → 改写 → 一个 delta + 改写的 block-end）；替换判定交给档位 |
 | `lib/strategies.mjs` | 档位注册表：三档基础 + `custom` + `off`，五个部件（prepare / skipInput / buildPrompt / finalize / accepts） |
 | `lib/route.mjs` | 档位三层解析、改写器路由解析（算力卸载）、内置预设解析、旧配置迁移、档位目录 |
-| `lib/custom.mjs` | 自定义预设：目录 / 列表 / 读（mtime 缓存）/ 另存为 / 提示词拼装 |
+| `lib/custom.mjs` | 用户配置/注入：目录 / 列表 / 读（mtime 缓存）/ 另存为 / 注入解析 / 提示词拼装 |
 | `lib/builtin-presets.mjs` | 内置预设（standard / deep）：正文、元数据、清单 |
 | `lib/advisor.mjs` | 指导层：路由解析、提示词、格式闸门、追加注入 |
-| `lib/gates.mjs` | 自定义预设的四道最小闸 |
+| `lib/gates.mjs` | 用户配置的四道最小闸 |
 | `lib/switch.mjs` | `/iot` 的纯逻辑（与 HTTP 桥共用同一张 `sessions` 表） |
 | `lib/compress.mjs` | 通用改写引擎：模型调用、effort 恢复、按档位判定与重试、确定性兜底 |
 | `lib/effort.mjs` | 改写器推理档位策略：id、按路由缓存、拒绝判定 |
