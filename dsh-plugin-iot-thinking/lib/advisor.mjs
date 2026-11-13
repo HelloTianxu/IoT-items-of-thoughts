@@ -13,6 +13,10 @@ import { normalizeRouteTarget } from "./route.mjs";
 import {
   AUTO_EFFORT,
   isUnsupportedEffortFailure,
+  isUnsupportedTemperatureFailure,
+  knownTemperaturePlan,
+  rememberTemperaturePlan,
+  temperaturePlanKey,
   knownEffortPlan,
   normalizeEffort,
   pickLowEffort,
@@ -150,7 +154,7 @@ async function probeLowEffortForAdvisor({ ctx, route, options, onEvent }) {
   }
 }
 
-export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace, effort }) {
+export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace, effort, temperature }) {
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const signal = controller?.signal ?? options?.signal;
   let timedOut = false;
@@ -161,9 +165,13 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
   timer.unref?.();
 
   const { mode, key, send } = await effortForAdvisor({ ctx, route, requested: effort, options, onEvent });
+  // 指导模型的 temperature 同样按路由记住：只接受默认值的模型不能每块白试一次。
+  const tempKey = temperaturePlanKey(route.provider, route.model, "advisor");
+  const knownTemp = knownTemperaturePlan(tempKey);
+  let temperatureToSend = knownTemp !== undefined ? knownTemp : (temperature === undefined ? 0.3 : temperature);
 
   /** 一次调用；超时与传输错误都以 `{ error }` 返回，交给外层决定是否降级。 */
-  const callOnce = async (effortSent) => {
+  const callOnce = async (effortSent, tempSent) => {
     const assembler = new Llm.BlockAssembler();
     let usage = null;
     try {
@@ -172,7 +180,7 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
         model: route.model,
         messages: [Llm.createUserMessage(prompt)],
         maxTokens: 800,
-        temperature: 0.3,
+        ...(tempSent === null ? {} : { temperature: tempSent }),
         purpose: "compaction",
         ...(effortSent === null ? {} : { reasoningEffort: effortSent }),
         ...(signal === undefined ? {} : { signal }),
@@ -205,7 +213,19 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
     return { raw, usage, finish, effortSent };
   };
 
-  let result = await callOnce(send);
+  let result = await callOnce(send, temperatureToSend);
+  if (result.error && knownTemp === undefined && isUnsupportedTemperatureFailure(result)) {
+    onEvent?.("advisor-temperature-fallback", {
+      provider: route.provider,
+      model: route.model,
+      requested: temperatureToSend,
+      reason: "unsupported",
+      message: result.error,
+    });
+    temperatureToSend = null;
+    result = await callOnce(send, temperatureToSend);
+    if (!result.error) rememberTemperaturePlan(tempKey, null);
+  }
   // 档位不被支持：只对 auto 做降级（显式档位是配置信号，不擅自换档）。
   if (result.error && mode === AUTO_EFFORT && isUnsupportedEffortFailure(result)) {
     onEvent?.("advisor-effort-fallback", {

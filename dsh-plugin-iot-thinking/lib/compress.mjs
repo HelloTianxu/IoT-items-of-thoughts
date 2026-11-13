@@ -4,6 +4,10 @@
 import {
   AUTO_EFFORT,
   isUnsupportedEffortFailure,
+  isUnsupportedTemperatureFailure,
+  knownTemperaturePlan,
+  rememberTemperaturePlan,
+  temperaturePlanKey,
   knownEffortPlan,
   normalizeEffort,
   pickLowEffort,
@@ -200,7 +204,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         model: target.model,
         // 不发字段 = 交给适配器默认值；off 仍是快路径（不花预算在自己的思考上）。
         ...(effort === null ? {} : { reasoningEffort: effort }),
-        temperature: temperatureForCall,
+        // null = 不发字段，交给模型默认值（有的模型只接受默认 temperature）。
+        ...(temperatureForCall === null ? {} : { temperature: temperatureForCall }),
         messages: [
           Llm.createUserMessage({
             content: [{ type: "text", text: instruction }],
@@ -309,7 +314,27 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     const key = planKey(target.provider, target.model, mode);
     const known = knownEffortPlan(key);
     const send = known !== undefined ? known : mode === AUTO_EFFORT ? "off" : mode;
-    let result = await run(instruction, temperatureForCall, send, target);
+    // temperature 决策也按路由记住：有的模型只接受默认值（例如 GPT-6 Astra 只认 1），
+    // 每次发 0.2 都会 400，白打一次调用。
+    const tempKey = temperaturePlanKey(target.provider, target.model, "rewrite");
+    const knownTemp = knownTemperaturePlan(tempKey);
+    let temperatureToSend = knownTemp !== undefined ? knownTemp : temperatureForCall;
+    let result = await run(instruction, temperatureToSend, send, target);
+    // 参数约束先处理：temperature 被拒与 effort 无关，去掉字段重试一次即可。
+    if (result.error && knownTemp === undefined && isUnsupportedTemperatureFailure(result)) {
+      mark("thinking-temperature-fallback", {
+        index,
+        provider: target.provider,
+        model: target.model,
+        stage,
+        requested: temperatureToSend,
+        reason: "unsupported",
+        message: result.error,
+      });
+      temperatureToSend = null;
+      result = await run(instruction, temperatureToSend, send, target);
+      if (!result.error) rememberTemperaturePlan(tempKey, null);
+    }
     // 截断先于 effort 降级判断：换档位不解决输出预算，继续降级只会再截一次。
     if (result.finish && result.finish.kind === "max-tokens") return result;
     if (!result.error || !isUnsupportedEffortFailure(result)) return result;
@@ -459,6 +484,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       timeoutMs,
       trace,
       effort: advisorCfg.effort,
+      temperature: advisorCfg.temperature,
       onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
     }).then((raw) => {
       // 空输出/截断的原因已经由 advise 自己记账（advisor-skipped），这里不再重复。

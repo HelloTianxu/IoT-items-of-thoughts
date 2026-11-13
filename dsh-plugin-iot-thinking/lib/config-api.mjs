@@ -329,6 +329,8 @@ function sanitize(payload) {
       const effort = normalizeEffort(raw.effort);
       if (effort !== null) out.effort = effort;
     }
+    if (raw.temperature === null) out.temperature = null;
+    else if (Number.isFinite(raw.temperature)) out.temperature = raw.temperature;
     for (const key of ["timeoutMs", "maxAdvice", "maxChars"]) {
       if (Number.isFinite(raw[key])) out[key] = Math.floor(raw[key]);
     }

@@ -62,6 +62,8 @@ export const DEFAULTS = Object.freeze({
     route: { provider: null, model: null },
     /** 指导模型的思考档位：auto = 先试 off，被拒再探最低档，再不行不发字段。 */
     effort: "auto",
+    /** 指导模型的 temperature；null = 不发该字段（有的模型只接受默认值）。 */
+    temperature: 0.3,
     timeoutMs: 30000,
     maxAdvice: 3,
     maxChars: 600,
@@ -190,6 +192,7 @@ function advisorConfig(value) {
     enabled: raw.enabled === true,
     route: { provider, model },
     effort: effort ?? "auto",
+    temperature: raw.temperature === null ? null : Number.isFinite(raw.temperature) ? raw.temperature : 0.3,
     timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
     maxAdvice: clampInt(raw.maxAdvice, 1, 3, 3),
     maxChars: clampInt(raw.maxChars, 80, 600, 600),

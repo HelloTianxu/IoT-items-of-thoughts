@@ -111,6 +111,9 @@ dsh 把 `llm/stream` 暴露成 **waterfall**，包住每一次模型调用；适
 - **逐档限制** — `minChars` / `maxChars` / `maxTokens` / `maxNodes` / `maxNeutral`；
 - **按 agent preset 映射** — "当 preset 是 X → 就用 Y"。渲染成一张**条件 → 结论**表，
   因为这里只有一层选择：preset 是条件，档位是结论；
+- **temperature 可配且会自动降级**：`temperature` 留空 = 不发该字段；有些模型只接受默认值
+  （例如 GPT-6 Astra 只认 1，发 0.2 直接 400）。被拒时会去掉该字段重试一次并记住这条路由，
+  不会每块都白打一次调用。指导模型同样有 `advisor.temperature` 与同一套降级。
 - **推理档位（`rewrite.effort`）** — `auto` 默认：先发 `off`（改写器不花预算在自己的
   thinking 上），宿主拒绝该档位就改用该路由公开的 `minimal`/`low`，没有就不发这个字段。
   决策按 `(provider, model, 档位)` 记住，同一路由不会再白试一次；

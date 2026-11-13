@@ -66,6 +66,7 @@ window.__ModuleLoader__.load({
       { key: "minChars", title: "最小改写字符数", desc: "短于这个长度的 thinking 不动，避免为几句话多调一次模型。", min: 0 },
       { key: "maxChars", title: "最大输入字符数", desc: "超过这个长度的 thinking 直接保留原文，避免改写调用自己撑爆窗口。", min: 1 },
       { key: "maxTokens", title: "输出上限 (tokens)", desc: "改写器的 maxTokens。", min: 1 },
+      { key: "temperature", title: "temperature", desc: "留空 = 不发该字段，交给模型默认值（有的模型只接受默认值）。", min: 0, step: 0.1 },
     ];
     const ITEM_LIMIT_FIELDS = [
       { key: "maxNodes", title: "最多节点数", desc: "超过后按优先级保留：决定 > 反对 > 权衡 > 风险 > 待定 > 计划 > 支持 > 中性。", min: 1 },
@@ -614,6 +615,7 @@ window.__ModuleLoader__.load({
           maxAdvice: Number.isFinite(advisor.maxAdvice) ? advisor.maxAdvice : 3,
           maxChars: Number.isFinite(advisor.maxChars) ? advisor.maxChars : 600,
           effort: typeof advisor.effort === "string" ? advisor.effort : "auto",
+          temperature: advisor.temperature === null ? null : Number.isFinite(advisor.temperature) ? advisor.temperature : 0.3,
         };
       })();
       const setAdvisor = (patch) => {
@@ -623,6 +625,7 @@ window.__ModuleLoader__.load({
           advisor: {
             route: { provider: next.provider, model: next.model },
             effort: next.effort,
+            temperature: next.temperature,
             maxAdvice: next.maxAdvice,
             maxChars: next.maxChars,
           },
@@ -881,6 +884,20 @@ window.__ModuleLoader__.load({
                     onChange: (e) => setAdvisor({ maxAdvice: Number(e.target.value) || 3 }),
                   }),
                   h("span", { style: { ...hint, fontSize: 11 } }, "宁少勿多：泛泛而谈的建议不如不给。")
+                ),
+                h("label", { style: limitCell },
+                  h("span", { style: fieldName }, "指导 temperature"),
+                  h("input", {
+                    type: "number",
+                    min: 0,
+                    max: 2,
+                    step: 0.1,
+                    placeholder: "0.3（留空 = 不发）",
+                    value: advisorCfg.temperature ?? "",
+                    style: { ...input, width: "100%", boxSizing: "border-box" },
+                    onChange: (e) => setAdvisor({ temperature: e.target.value === "" ? null : Number(e.target.value) }),
+                  }),
+                  h("span", { style: { ...hint, fontSize: 11 } }, "有的模型只接受默认 temperature（如 GPT-6 Astra 只认 1）；留空就不发该字段。")
                 ),
                 h("label", { style: limitCell },
                   h("span", { style: fieldName }, "建议总字数上限"),

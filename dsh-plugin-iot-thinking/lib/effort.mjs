@@ -57,3 +57,33 @@ export function isUnsupportedEffortFailure(result) {
   if (result.code === "UNSUPPORTED_REASONING_EFFORT") return true;
   return /does not support reasoning effort/i.test(String(result.error));
 }
+
+/**
+ * 有些模型只接受默认 temperature（例如 GPT-6 Astra 只认 1），发 0.2/0.3 会 400。
+ * 这类拒绝是**参数约束**，不是网络错误：正确做法是去掉该字段重试一次，并记住这个路由。
+ */
+export function isUnsupportedTemperatureFailure(result) {
+  if (!result || !result.error) return false;
+  if (result.code === "UNSUPPORTED_TEMPERATURE") return true;
+  const message = String(result.error);
+  return /temperature/i.test(message) && /(unsupported|does not support|only.*default|invalid)/i.test(message);
+}
+
+/** temperature 决策缓存：与 effort 分开，避免两条降级链互相污染。 */
+const TEMPERATURE_PLANS = new Map();
+
+export function temperaturePlanKey(provider, model, mode) {
+  return `temperature:${String(provider ?? "")}/${String(model ?? "")}/${String(mode ?? "")}`;
+}
+
+export function knownTemperaturePlan(key) {
+  return TEMPERATURE_PLANS.get(key);
+}
+
+export function rememberTemperaturePlan(key, value) {
+  TEMPERATURE_PLANS.set(key, value);
+}
+
+export function resetTemperaturePlans() {
+  TEMPERATURE_PLANS.clear();
+}

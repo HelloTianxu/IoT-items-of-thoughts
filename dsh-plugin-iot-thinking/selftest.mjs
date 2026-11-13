@@ -1892,6 +1892,36 @@ await check("指导层：调用失败不影响压缩结果", async () => {
   assert.equal(result.advice ?? null, null);
 });
 
+await check("temperature：模型只接受默认值时去掉字段重试，并记住这条路由", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push(options.temperature);
+        if (options.temperature !== undefined) {
+          return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "Unsupported value: 'temperature' does not support 0.2 with this model", code: "INVALID_REQUEST" } } }]);
+        }
+        return chunks([{ type: "text-delta", index: 0, text: "[决定] 甲。\n\n[计划] 乙。" }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const cfg = { strategy: "iot-full", limits: { ...limitsOf("iot-full"), temperature: 0.2 } };
+  const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
+  assert.ok(result && result.text.includes("[决定]"), "去掉 temperature 后应成功");
+  assert.equal(calls[0], 0.2);
+  assert.equal(calls[1], undefined, "第二次不发该字段");
+  assert.ok(events.some((entry) => entry.event === "thinking-temperature-fallback"));
+});
+
+await check("temperature：配置为 null 时从一开始就不发字段", async () => {
+  const calls = [];
+  const ctx = { llm: { stream: (options) => { calls.push(options.temperature); return chunks([{ type: "text-delta", index: 0, text: "[决定] 甲。" }, { type: "finish", reason: { kind: "stop" } }]); } } };
+  const cfg = { strategy: "iot-full", limits: { ...limitsOf("iot-full"), temperature: null } };
+  await compressWith(ctx, { cfg, text: DRAFT.repeat(2) });
+  assert.equal(calls[0], undefined);
+});
+
 await check("指导档位：显式档位原样发出；auto 被拒时降级并记账", async () => {
   const calls = [];
   const events = [];
