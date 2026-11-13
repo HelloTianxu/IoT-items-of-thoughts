@@ -74,6 +74,37 @@ window.__ModuleLoader__.load({
     ];
 
     const h = react.createElement;
+
+    /**
+     * 渲染期兜底：设置卡抛错时不要整页白屏，把错误显示出来。
+     * 宿主 React 提供 Component 时用 class 边界；没有就退化成直接渲染。
+     */
+    function withErrorBoundary(Component, title) {
+      const Base = react.Component;
+      if (typeof Base !== "function") return Component;
+      class Boundary extends Base {
+        constructor(props) {
+          super(props);
+          this.state = { error: null };
+        }
+        static getDerivedStateFromError(error) {
+          return { error };
+        }
+        componentDidCatch(error, info) {
+          console.error("[iot-thinking] " + title + " 渲染失败", error, info);
+        }
+        render() {
+          if (this.state.error) {
+            return h("div", { style: { padding: 16, fontSize: 12, color: "#c0392b", whiteSpace: "pre-wrap" } },
+              title + "渲染失败：" + String(this.state.error?.message ?? this.state.error),
+              h("div", { style: { marginTop: 6, color: "#8a8f98" } }, "详情见浏览器控制台；也可先按 dsh-unlag 的刷新按钮重建界面。")
+            );
+          }
+          return h(Component, this.props);
+        }
+      }
+      return Boundary;
+    }
     const box = { border: "1px solid var(--dsw-alias-border-l2, #e3e6ea)", borderRadius: 10, padding: 14, maxWidth: 760 };
     const hint = { fontSize: 11.5, color: "var(--dsw-alias-label-tertiary, #8a8f98)", lineHeight: 1.6 };
     const input = { width: 110, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--dsw-alias-border-l2, #ccc)", background: "transparent", color: "inherit", fontSize: 12 };
@@ -1812,7 +1843,7 @@ window.__ModuleLoader__.load({
         order: 90,
         label: () => "IoT 思考改写",
         inject: () => ({}),
-      }, IotThinkingCard)), "iot-thinking: settings tab");
+      }, withErrorBoundary(IotThinkingCard, "IoT 设置卡"))), "iot-thinking: settings tab");
 
       // 顶栏下拉与设置卡是同一条链的两端：卡管默认，下拉管这一个会话。
       // 槽位不在时（非 web 组合）静默跳过。
