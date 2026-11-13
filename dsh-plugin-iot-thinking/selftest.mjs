@@ -1361,9 +1361,9 @@ const ROUTE_CFG = {
   sessions: { "s-boss": "iot-compact" },
 };
 
-await check("策略目录：七个策略（含第 4 项自定义），id 唯一，默认策略在其中", () => {
+await check("策略目录：八个策略（含指导档与第 4 项自定义），id 唯一，默认策略在其中", () => {
   const ids = strategyIds();
-  assert.deepEqual(ids, ["iot-compact", "iot-balanced", "iot-full", "custom", "off"]);
+  assert.deepEqual(ids, ["iot-compact", "iot-balanced", "iot-full", "iot-guided", "custom", "off"]);
   assert.equal(new Set(ids).size, ids.length);
   assert.ok(ids.includes(DEFAULT_STRATEGY));
   const catalog = strategyCatalog();
@@ -1796,6 +1796,37 @@ await check("内置预设可编辑：覆盖文本优先，恢复默认后回到�
   assert.equal(prepared.state.edited, true);
 });
 
+await check("模式一（指导档）：一次调用同时产出压缩节点与 [指导]，且 [指导] 不占节点预算", () => {
+  const strategy = strategyById("iot-guided");
+  assert.ok(strategy, "指导档必须存在");
+  assert.ok(strategy.labels.includes("指导"), "指导档的合法标签包含 [指导]");
+  const prompt = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 } });
+  assert.ok(prompt.includes("[指导]"), "提示词必须说明 [指导] 的写法");
+  assert.ok(prompt.includes("建议型"), "指导是建议而不是命令");
+
+  const raw = "[决定] 先把替换闸门的判定顺序写成测试。\n\n[计划] 再改设置卡里的档位选择。\n\n[指导] 建议先补一个替换闸门的测试。";
+  const verdict = strategy.finalize(raw, { original: "很长的草稿".repeat(50), limits: { maxNodes: 2, maxNeutral: 2 } });
+  assert.equal(verdict.ok, true);
+  assert.ok(verdict.text.includes("[指导]"), "指导节点必须保留");
+  // maxNodes=2 只约束压缩节点；[指导] 不参与截断。
+  assert.equal(verdict.text.split("\n\n").length, 3);
+});
+
+await check("模式一与模式二互斥：指导档下不再发外部指导", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = { llm: { stream: (options) => { calls.push(options.model); return chunks([{ type: "text-delta", index: 0, text: "[决定] 先把替换闸门的判定顺序写成测试。\n\n[指导] 建议先补一个替换闸门的测试。" }, { type: "finish", reason: { kind: "stop" } }]); } } };
+  const cfg = {
+    strategy: "iot-guided",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { enabled: true, route: { provider: "strong", model: "strong" } },
+  };
+  const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
+  assert.equal(calls.length, 1, "指导档只调用压缩器，不再打强模型");
+  assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "guided-tier"));
+  assert.equal(result.advice ?? null, null);
+});
+
 await check("指导层：关闭时不调用，开启时调用强模型并给出可注入的建议", async () => {
   const calls = [];
   const ctx = {
@@ -1821,7 +1852,7 @@ await check("指导层：关闭时不调用，开启时调用强模型并给出�
   assert.equal(result.text, "[决定] 先做替换闸门。\n\n[计划] 补测试。", "主体不含指导");
   assert.ok(result.advice.includes("[指导]"), "指导单独返回");
   assert.equal(calls.length, 2, "压缩一次 + 指导一次");
-  assert.equal(calls[1].model, "strong", "指导走配置的强模型");
+  assert.ok(calls.some((call) => call.model === "strong"), "指导走配置的强模型");
 });
 
 await check("指导层：关闭时不多打一次模型", async () => {
@@ -1854,7 +1885,7 @@ await check("指导层：调用失败不影响压缩结果", async () => {
     advisor: { enabled: true, route: { provider: "strong", model: "strong" } },
     limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" },
   };
-  const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak" } });
+  const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2) });
   assert.equal(result.text, "[决定] 甲。", "指导失败时主体原样保留");
   assert.equal(result.advice ?? null, null);
 });
@@ -2511,7 +2542,7 @@ await check("session API：GET 说明解析来源，PUT 写覆盖并可清回跟
   assert.equal(read.payload.route.source, "preset");
   assert.equal(read.payload.override, null);
   // 两级值域：第一级是档位（三档 + custom + off），第二级是具体预设
-  assert.deepEqual(read.payload.choices.tiers.map((entry) => entry.value), ["iot-compact", "iot-balanced", "iot-full", "custom", "off"]);
+  assert.deepEqual(read.payload.choices.tiers.map((entry) => entry.value), ["iot-compact", "iot-balanced", "iot-full", "iot-guided", "custom", "off"]);
   assert.ok(Array.isArray(read.payload.choices.presets), "第二级是预设清单");
   assert.equal(typeof read.payload.choices.presetDirSet, "boolean");
 

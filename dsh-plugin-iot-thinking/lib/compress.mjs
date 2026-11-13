@@ -407,13 +407,28 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    * ② 独立超时，失败一律返回原文（增强不能把主流程拖挂）；
    * ③ 指导不参与节点预算，追加在末尾。
    */
-  const maybeAdvise = async (nodes) => {
+  /**
+   * 模式二：外部指导，与压缩**并发**两路。
+   *
+   * 指导模型拿的是**原始 thinking 草稿**（不是压缩骨架），压缩模型拿同一份草稿；
+   * 两路结果合并成最终的 think 内容。并发是为了不让指导的延迟叠加到压缩上；
+   * 指导失败只丢指导，压缩结果照常返回。
+   */
+  const startAdvice = () => {
+    // 模式一（档位内 [指导]）与模式二（外部指导）互斥：同一块不该出现两份指导。
+    // 要外部指导就把档位切回普通压缩档。
+    if (Array.isArray(strategy.labels) && strategy.labels.includes("指导")) {
+      if (cfg.advisor?.enabled === true) {
+        mark("advisor-skipped", { index, strategy: strategy.id, reason: "guided-tier" });
+      }
+      return null;
+    }
     const advisorRoute = resolveAdvisorRoute(cfg, strategy.id, sessionRoute);
-    if (!advisorRoute) return { text: nodes, advice: null, event: null };
+    if (!advisorRoute) return null;
     const advisorCfg = cfg.advisor ?? {};
     const timeoutMs = Math.min(120000, Math.max(3000, Number(advisorCfg.timeoutMs) || 30000));
     const prompt = buildAdvisorPrompt({
-      nodes,
+      draft: text,
       goal: advisorCfg.goal ?? recent[0] ?? "",
       recent,
       limits: advisorCfg,
@@ -425,8 +440,9 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       model: advisorRoute.model,
       source: advisorRoute.source,
       offloaded: advisorRoute.offloaded,
+      mode: "parallel",
     });
-    const raw = await advise({
+    return advise({
       ctx,
       Llm,
       route: advisorRoute,
@@ -434,31 +450,37 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       options,
       timeoutMs,
       onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
+    }).then((raw) => {
+      if (!raw) {
+        mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-output" });
+        return null;
+      }
+      const advice = formatAdvice(raw, advisorCfg);
+      if (!advice) {
+        mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-usable-line" });
+        return null;
+      }
+      mark("advisor-ready", {
+        index,
+        strategy: strategy.id,
+        provider: advisorRoute.provider,
+        model: advisorRoute.model,
+        adviceLines: advice.split("\n\n").length,
+        charsOut: advice.length,
+      });
+      return {
+        advice,
+        event: { provider: advisorRoute.provider, model: advisorRoute.model, offloaded: advisorRoute.offloaded, lines: advice.split("\n\n").length },
+      };
     });
-    if (!raw) {
-      mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-output" });
-      return { text: nodes, advice: null, event: null };
-    }
-    const advice = formatAdvice(raw, advisorCfg);
-    if (!advice) {
-      mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-usable-line" });
-      return { text: nodes, advice: null, event: null };
-    }
-    const lines = advice.split("\n\n").length;
-    mark("advisor-ready", {
-      index,
-      strategy: strategy.id,
-      provider: advisorRoute.provider,
-      model: advisorRoute.model,
-      adviceLines: lines,
-      charsOut: advice.length,
-    });
-    // 主体仍是压缩结果；指导单独带出，由 stream 在替换判定之后追加。
-    return {
-      text: nodes,
-      advice,
-      event: { provider: advisorRoute.provider, model: advisorRoute.model, offloaded: advisorRoute.offloaded, lines },
-    };
+  };
+
+  /** 压缩成功后才收指导结果：压缩失败时指导结果直接丢弃。 */
+  const collectAdvice = async (nodes, pending) => {
+    if (!pending) return { text: nodes, advice: null, event: null };
+    const result = await pending;
+    if (!result) return { text: nodes, advice: null, event: null };
+    return { text: nodes, advice: result.advice, event: result.event };
   };
 
   const finishFields = (finish, fields) => ({
@@ -570,7 +592,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     if (verdict.ok) {
       // 防御：档位没回 text 时（自定义预设早期版本就这样）退回原始输出，不在这里抛。
       const out = typeof verdict.text === "string" ? verdict.text : String(result.output ?? "").trim();
-      const advised = await maybeAdvise(out);
+      const advised = await collectAdvice(out, pendingAdvice);
       // 指导与主体分开返回：stream 要先按"主体"做替换判定（必须更短），
       // 通过之后再追加指导 —— 否则指导会把候选撑长，shorter 档位直接拒掉。
       return {
@@ -615,6 +637,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     return null;
   }
 
+  // 指导与压缩并发：先启动指导请求，压缩照常跑；压缩失败时这个 Promise 会被丢弃。
+  const pendingAdvice = startAdvice();
   const first = await pass({ strict: false, reason: null, detail: null, stage: "first", temperatureForCall: temperature });
   if (first.done) return first.value;
 

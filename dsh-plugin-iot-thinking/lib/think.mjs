@@ -156,6 +156,17 @@ export const PROFILES = Object.freeze({
     maxNeutral: 3,
     map: Object.freeze({}),
   }),
+  // 指导档：压缩器一次调用同时产出压缩节点与**教师视角的建议**。
+  // 它仍然是压缩（一次调用、一份输出），只是标签集多一个 [指导]；
+  // 与"外部指导"（另发一路强模型）是两种独立模式，不要混为一谈。
+  guided: Object.freeze({
+    id: "guided",
+    label: "指导（压缩 + 教师建议）",
+    labels: ["支持", "反对", "中性", "计划", "权衡", "待定", "风险", "决定", "指导"],
+    maxNodes: 8,
+    maxNeutral: 2,
+    map: Object.freeze({}),
+  }),
 });
 
 export const COMPACT_INSTRUCTION = `你是工作记忆的**推理编排器**，不是摘要器，也不是工作日志记录器。
@@ -380,10 +391,37 @@ export function fallbackItems(text) {
  * "plan a trip / 写个函数" 当成用户请求直接回答，产出计划而不是节点。
  */
 /** 档位 → 指令与预算。加档位只改这两张表，不动装配逻辑。 */
+export const GUIDED_INSTRUCTION = `你是工作记忆的**推理编排器**，同时兼任教师。
+
+输入是另一个模型的 thinking 草稿。你要输出两部分，合在一起才是结果：
+1. 压缩节点：把草稿压成能直接接着干的推理骨架（标签规则与"完整"档一致）；
+2. 指导节点：以教师身份，给这个推理过程 1~2 条**建议型**的补充——不是命令，
+   而是"还可以从哪个角度看""哪里可能漏了检查""下一步值得先做什么"。
+
+标签（纯文本；一行一条；节点之间空一行；不要 JSON、代码块、前言、编号或 Markdown 列表符号）：
+
+[支持] 已定结论、关键事实、理由、证据
+[反对] 被否掉的路线、反例、代价、风险
+[中性] 背景、观察、需要记住的事实
+[计划] 接下来要做什么、顺序、验收动作
+[权衡] 取舍、比较、优先级
+[待定] 还没定/需要确认的问题
+[风险] 隐患、兜底、可能翻车的地方
+[决定] 已经拍板的结论
+[指导] 教师视角的建议：换角度、补检查、下一步优先项（1~2 条，建议型，不是命令）
+
+节点预算（硬约束）：
+- 压缩节点目标 4~6 条，最多 8 条；[中性] 最多 2 条。
+- [指导] 最多 2 条，每条 ≤80 字；宁可只给一条真正有用的，也不要凑数。
+- 只压不补：文件名、符号、数字必须在原文出现过；禁止完成态断言（已实现/已落盘/测试通过）。
+- 禁止退化重复：不要续写草稿里的标签或"好/现在/写/结束"这类词；每个节点必须是完整句子（至少 12 个汉字）；没有内容就输出空。
+- 正文用中文。`;
+
 export const INSTRUCTIONS = Object.freeze({
   compact: COMPACT_INSTRUCTION,
   balanced: BALANCED_INSTRUCTION,
   research: RESEARCH_INSTRUCTION,
+  guided: GUIDED_INSTRUCTION,
   full: IOT_INSTRUCTION,
 });
 
@@ -391,6 +429,7 @@ const BUDGETS = Object.freeze({
   compact: "目标 3~4 条，最多 5 条；不要 [中性]",
   balanced: "目标 4~6 条，最多 6 条；不要 [中性]",
   research: "目标 6~9 条，最多 12 条；[中性] 最多 3 条，[权衡] 最多 3 条",
+  guided: "压缩节点目标 4~6 条、最多 8 条，[中性] 最多 2 条；[指导] 最多 2 条",
   full: "目标 4~6 条，最多 8 条，[中性] 最多 2 条",
 });
 
@@ -549,7 +588,8 @@ export function formatNodes(text, options = {}) {
     .map((node) => {
       const name = labelOf(node).slice(1, -1);
       let target = labelMap[name] ?? name;
-      if (!profile.labels.includes(target)) target = profile.id === "full" ? target : "支持";
+      // full 与 guided 都保留未知标签：guided 的 [指导] 就是靠这条留住的。
+      if (!profile.labels.includes(target)) target = profile.id === "full" || profile.id === "guided" ? target : "支持";
       return target === name ? node : node.replace(/^\[[^\]]+\]/, `[${target}]`);
     })
     .filter(Boolean);
@@ -596,6 +636,15 @@ export function formatNodes(text, options = {}) {
     }
   }
 
+  // 指导节点不参与压缩节点的预算与优先级：它是"教师补充"，不该挤掉 [决定]。
+  // 先摘出来，压缩节点照常截断，最后再接回去（最多 2 条）。
+  const adviceNodes = profile.id === "guided"
+    ? nodes.filter((node) => labelOf(node) === "[指导]").slice(0, 2)
+    : [];
+  if (adviceNodes.length) {
+    nodes = nodes.filter((node) => labelOf(node) !== "[指导]");
+  }
+
   if (nodes.length > maxNodes) {
     const keep = nodes
       .map((node, index) => ({ index, priority: NODE_PRIORITY[labelOf(node)] ?? 99 }))
@@ -605,7 +654,7 @@ export function formatNodes(text, options = {}) {
     nodes = nodes.filter((_, index) => keepIndexes.has(index));
   }
 
-  return nodes.join("\n\n");
+  return [...nodes, ...adviceNodes].join("\n\n");
 }
 
 /** Backwards-compatible alias for older imports/tests. */

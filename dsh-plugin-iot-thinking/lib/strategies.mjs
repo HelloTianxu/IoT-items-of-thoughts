@@ -186,6 +186,15 @@ export const STRATEGIES = Object.freeze([
     summary: "8 标签、4~6 条节点。[权衡]/[风险]/[待定] 都保留，质量优先。",
     defaults: {},
   }),
+  // 模式一：同一次压缩调用里，压缩器自己兼任教师，额外输出 1~2 条 [指导]。
+  // 本质仍是压缩（一次调用、一份输出），不是"另发一路强模型"。
+  itemsStrategy({
+    id: "iot-guided",
+    label: "决策 · 指导（压缩 + 教师建议）",
+    profile: "guided",
+    summary: "8 标签压缩 + 1~2 条 [指导] 建议；不额外调用模型，成本与完整档相同。",
+    defaults: {},
+  }),
   customStrategy(),
   offStrategy(),
 ]);

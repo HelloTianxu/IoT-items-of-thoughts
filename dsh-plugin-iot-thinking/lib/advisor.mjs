@@ -50,7 +50,7 @@ export function resolveAdvisorRoute(cfg, strategyId, sessionRoute) {
  * 刻意把"只给可执行的下一步"写死：强模型最容易犯的错是复述已知信息、
  * 或者给一堆"可以考虑…"的空话。这些注入回去只会浪费上下文。
  */
-export function buildAdvisorPrompt({ nodes, goal, recent, limits }) {
+export function buildAdvisorPrompt({ draft, nodes, goal, recent, limits }) {
   const maxAdvice = Math.min(ADVISOR_LIMITS.maxAdvice, Math.max(1, Number(limits?.maxAdvice) || ADVISOR_LIMITS.maxAdvice));
   const maxChars = Math.min(ADVISOR_LIMITS.maxChars, Math.max(80, Number(limits?.maxChars) || ADVISOR_LIMITS.maxChars));
   const recentLines = Array.isArray(recent) && recent.length
@@ -58,13 +58,15 @@ export function buildAdvisorPrompt({ nodes, goal, recent, limits }) {
     : "（还没有工具结果）";
   return [
     "你是一位资深工程师，正在审阅另一个模型刚刚写下的推理骨架。",
-    "你只能看到压缩后的节点和最近的几个动作结果 —— 看不到完整对话。这是刻意的：只根据这些判断方向。",
+    "你只能看到它的 thinking 草稿和最近的几个动作结果 —— 看不到完整对话。这是刻意的：只根据这些判断方向。",
     "",
     "任务目标：",
     String(goal ?? "（未提供）").slice(0, 400),
     "",
-    "它刚刚的推理骨架：",
-    String(nodes ?? "").slice(0, 4000),
+    // 模式二看**原始思考**（不是压缩后的骨架）：信息更全，代价是这一段更长。
+    // 仍然只发 thinking，不发完整对话，所以比"整段上下文喂强模型"便宜得多。
+    "它刚刚的原始思考草稿：",
+    String(draft ?? nodes ?? "").slice(0, 12000),
     "",
     "最近的动作结果：",
     recentLines,
