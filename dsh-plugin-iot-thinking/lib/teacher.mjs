@@ -68,6 +68,29 @@ export const TEACHER_LIMITS = Object.freeze({
   cooldownBlocks: 3,
 });
 
+/**
+ * 把配置形态归一成内部 limits：配置里写的是 `depthRange: [min, max]`，
+ * 内部用的是 `minDepth/maxDepth`。两处调用方（stream 注入状态行、tool 执行）
+ * 必须走同一个归一化，否则状态行会显示 `深度 undefined-undefined`。
+ */
+export function normalizeTeacherLimits(cfg = {}) {
+  const raw = cfg && typeof cfg === "object" && !Array.isArray(cfg) ? cfg : {};
+  const range = Array.isArray(raw.depthRange) && raw.depthRange.length === 2
+    ? [Math.floor(Number(raw.depthRange[0])), Math.floor(Number(raw.depthRange[1]))]
+    : null;
+  const minDepth = Number.isFinite(range?.[0]) ? Math.max(1, Math.min(5, range[0])) : TEACHER_LIMITS.minDepth;
+  const maxDepth = Number.isFinite(range?.[1]) ? Math.max(1, Math.min(5, range[1])) : TEACHER_LIMITS.maxDepth;
+  const [low, high] = minDepth <= maxDepth ? [minDepth, maxDepth] : [maxDepth, minDepth];
+  return {
+    ...TEACHER_LIMITS,
+    minDepth: low,
+    maxDepth: high,
+    cooldownBlocks: Number.isFinite(raw.cooldownBlocks) ? Math.max(0, Math.floor(raw.cooldownBlocks)) : TEACHER_LIMITS.cooldownBlocks,
+    inputBudget: Number.isFinite(raw.inputBudget) ? Math.max(1000, Math.floor(raw.inputBudget)) : TEACHER_LIMITS.inputBudget,
+    maxTokens: Number.isFinite(raw.maxTokens) ? Math.max(200, Math.floor(raw.maxTokens)) : TEACHER_LIMITS.maxTokens,
+  };
+}
+
 /** 冷却状态：按会话记"下一次可用时的块序号"。只暴露冷却，不暴露总额。 */
 const TEACHER_STATE = new Map();
 

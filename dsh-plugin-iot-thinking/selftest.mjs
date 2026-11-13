@@ -68,6 +68,7 @@ import {
   consultTeacher,
   extractSessionContext,
   formatTeacherStatus,
+  normalizeTeacherLimits,
   markConsulted,
   noteBlock,
   resetTeacherState,
@@ -119,6 +120,34 @@ function strictCreateUserMessage(input) {
 }
 
 const source = () => chunks([start(), delta("abcde"), delta("fghij"), end("abcdefghij"), textDelta("hello"), finish()]);
+
+await check("教师状态行穿过 stream：显示真实深度，咨询后冷却按块递减", async () => {
+  resetTeacherState();
+  const teacher = { enabled: true, depthRange: [1, 5], cooldownBlocks: 3 };
+  const options = { ...baseOptions, sessionId: "stream-teacher" };
+  const cfg = { ...baseConfig, teacher };
+  const run = async () => {
+    const out = await collect(transformStream(
+      chunks([start(), delta("abcdefghij"), end("abcdefghij"), textDelta("正文"), finish()]),
+      options,
+      { shouldTransform: () => true, getConfig: () => cfg, rewrite: async () => "· X", onEvent: () => {} },
+    ));
+    return out.find((chunk) => chunk.type === "block-end")?.block?.text ?? "";
+  };
+  const first = await run();
+  assert.ok(first.includes("[教师] 可用"), "首块应显示可用");
+  assert.ok(first.includes("深度 1-5"), "深度必须是真实范围，不是 undefined：" + first);
+  assert.ok(!first.includes("undefined"), "不能出现 undefined");
+  // 模拟一次咨询成功后进入冷却。
+  markConsulted("stream-teacher", { cooldownBlocks: 3 });
+  const cooling = await run();
+  assert.ok(cooling.includes("[教师] 冷却中"), "咨询后应显示冷却");
+  assert.ok(cooling.includes("还需 3 块"), "刚咨询后是 3 块：" + cooling);
+  // 再跑一块，应该递减到 2。
+  const next = await run();
+  assert.ok(next.includes("还需 2 块"), "块推进要递减：" + next);
+  resetTeacherState();
+});
 
 await check("完成块被压缩替换：不再出现原始 deltas", async () => {
   const out = await collect(transformStream(source(), baseOptions, deps(async () => "· X")));
@@ -2124,6 +2153,25 @@ await check("教师冷却：调用后进入 CD，按块递减，冷却中拒绝�
   assert.equal(canConsult("s1"), true, "冷却结束恢复可用");
   // 会话隔离：另一个会话不受影响。
   assert.equal(canConsult("s2"), true);
+  resetTeacherState();
+});
+
+await check("教师配置归一化：depthRange 转成 minDepth/maxDepth，状态行不再显示 undefined", () => {
+  const limits = normalizeTeacherLimits({ enabled: true, depthRange: [2, 4], cooldownBlocks: 5 });
+  assert.equal(limits.minDepth, 2);
+  assert.equal(limits.maxDepth, 4);
+  assert.equal(limits.cooldownBlocks, 5);
+  const line = formatTeacherStatus(teacherStatus("cfg-1", limits), limits);
+  assert.ok(line.includes("深度 2-4"), "要显示真实范围：" + line);
+  assert.ok(!line.includes("undefined"), "不能出现 undefined");
+  // 缺配置时落回默认，而不是 undefined。
+  const fallback = normalizeTeacherLimits({});
+  assert.equal(fallback.minDepth, 1);
+  assert.equal(fallback.maxDepth, 5);
+  // 反序输入要被纠正。
+  const reversed = normalizeTeacherLimits({ depthRange: [4, 2] });
+  assert.equal(reversed.minDepth, 2);
+  assert.equal(reversed.maxDepth, 4);
   resetTeacherState();
 });
 

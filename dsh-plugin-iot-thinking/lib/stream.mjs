@@ -5,7 +5,7 @@
 
 import { DEFAULT_STRATEGY, isShorterReplacement, strategyById } from "./strategies.mjs";
 import { appendAdvice } from "./advisor.mjs";
-import { formatTeacherStatus, noteBlock, teacherStatus } from "./teacher.mjs";
+import { formatTeacherStatus, noteBlock, normalizeTeacherLimits, teacherStatus } from "./teacher.mjs";
 
 export { isShorterReplacement };
 
@@ -147,8 +147,13 @@ export async function* transformStream(source, options, deps) {
     // 它在这里追加，所以不会被压缩器重映射/截断。
     // resolveConfig 已把全局默认与会话覆盖合并进 cfg.teacher（会话只能改开关）。
     const teacherCfg = cfg?.teacher && typeof cfg.teacher === "object" ? cfg.teacher : null;
+    // 状态行与 tool 执行必须用同一份归一化后的 limits：配置里是 depthRange，
+    // 状态行读的是 minDepth/maxDepth —— 直接传原始配置会显示 undefined-undefined。
     const statusLine = teacherCfg?.enabled === true
-      ? formatTeacherStatus(teacherStatus(options?.sessionId, teacherCfg), teacherCfg)
+      ? (() => {
+          const limits = normalizeTeacherLimits(teacherCfg);
+          return formatTeacherStatus(teacherStatus(options?.sessionId, limits), limits);
+        })()
       : "";
     const text = statusLine ? `${withAdvice}\n\n${statusLine}` : withAdvice;
     if (advice) emit("advisor-appended", { index, adviceLines: String(advice).split("\n\n").length, charsAdded: withAdvice.length - body.length });
@@ -185,17 +190,25 @@ export async function* transformStream(source, options, deps) {
 
     if (chunk?.type === "block-end" && chunk.block?.type === "reasoning") {
       const buffered = buffers.get(chunk.index);
-      // CD 按"块"计量：每个 thinking 块结束都推进一次，无论这一块是否被替换。
-      // 否则冷却永远不转，模型会看到一条永远"冷却中"的状态行。
+      // A block-end without deltas still carries its assembled text.
+      if (buffered || String(chunk.block.text ?? "").trim()) {
+        // 先渲染状态行、再推进 CD：状态行是"这一块开始时"的状态，模型看到它之后
+        // 这一块才算结束。反过来会让冷却凭空少一块（调用后第一块就显示 2 块）。
+        yield* replace(chunk.index, chunk, buffered);
+        // CD 按"块"计量：块结束就推进，与这一块是否被替换、是否有内容无关。
+        // 空块也算一块 —— 否则长会话里空块会让冷却永远走不完。
+        try {
+          noteBlock(options?.sessionId);
+        } catch {
+          /* 状态推进失败不该影响主流程 */
+        }
+        continue;
+      }
+      // 空块：仍然是一块结束，CD 要推进。
       try {
         noteBlock(options?.sessionId);
       } catch {
         /* 状态推进失败不该影响主流程 */
-      }
-      // A block-end without deltas still carries its assembled text.
-      if (buffered || String(chunk.block.text ?? "").trim()) {
-        yield* replace(chunk.index, chunk, buffered);
-        continue;
       }
     }
 

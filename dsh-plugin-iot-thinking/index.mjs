@@ -15,6 +15,7 @@ import {
   ASK_KINDS,
   TEACHER_LIMITS,
   buildTeacherPrompt,
+  normalizeTeacherLimits,
   canConsult,
   consultTeacher,
   extractSessionContext,
@@ -148,14 +149,8 @@ export function apply(ctx, config = {}) {
     const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
     return { cfg, sessionId, resolved, teacher: resolved.teacher ?? {}, enabled: cfg.enabled !== false && resolved.teacher?.enabled === true };
   };
-  const teacherLimits = (teacherCfg) => ({
-    ...TEACHER_LIMITS,
-    cooldownBlocks: teacherCfg.cooldownBlocks ?? TEACHER_LIMITS.cooldownBlocks,
-    inputBudget: teacherCfg.inputBudget ?? TEACHER_LIMITS.inputBudget,
-    maxTokens: teacherCfg.maxTokens ?? TEACHER_LIMITS.maxTokens,
-    minDepth: teacherCfg.depthRange?.[0] ?? TEACHER_LIMITS.minDepth,
-    maxDepth: teacherCfg.depthRange?.[1] ?? TEACHER_LIMITS.maxDepth,
-  });
+  // 与 stream.mjs 的状态行共用同一份归一化：两处各写一遍必然分叉。
+  const teacherLimits = (teacherCfg) => normalizeTeacherLimits(teacherCfg);
   const teacherTool = () => {
     return defineTool({
       name: "iot_consult_teacher",
