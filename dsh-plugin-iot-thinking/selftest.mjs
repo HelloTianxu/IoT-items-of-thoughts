@@ -2044,6 +2044,32 @@ await check("指导路由：未配 route 时跟随压缩器路由，未启用返
   assert.equal(own.offloaded, true, "与压缩路由不同就算卸载");
 });
 
+await check("指导开关走 guidance：advisor.enabled 没设也要能调用外部指导", async () => {
+  const calls = [];
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        calls.push({ model: options.model });
+        const text = options.model === "strong" ? "[指导] 先补测试。" : "[决定] 先做替换闸门。";
+        return chunks([{ type: "text-delta", index: 0, text }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const cfg = {
+    strategy: "iot-full",
+    rewrite: { provider: "weak", model: "weak" },
+    // 只有 guidance 与 advisor.route；advisor.enabled 刻意不写。
+    advisor: { route: { provider: "strong", model: "strong" }, maxAdvice: 3, maxChars: 600 },
+    guidance: { enabled: true, mode: "external" },
+  };
+  const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
+  assert.ok(result, "压缩结果要保留");
+  assert.ok(result.advice && result.advice.includes("[指导]"), "外部指导要产出建议");
+  assert.ok(calls.some((call) => call.model === "strong"), "必须真的调用强模型");
+  assert.ok(events.some((entry) => entry.event === "advisor-called"), "要记账 advisor-called");
+});
+
 await check("指导提示词：把目标、骨架、最近结果都带上，并要求可执行", () => {
   const prompt = buildAdvisorPrompt({ nodes: "[决定] 甲", goal: "把插件做稳", recent: ["跑了 selftest", "失败 2 项"], limits: { maxAdvice: 2, maxChars: 300 } });
   assert.ok(prompt.includes("把插件做稳"));

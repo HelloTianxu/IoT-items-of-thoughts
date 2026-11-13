@@ -41,7 +41,9 @@ export const ADVISOR_LIMITS = Object.freeze({
  */
 export function resolveAdvisorRoute(cfg, strategyId, sessionRoute) {
   const advisor = cfg?.advisor;
-  if (!advisor || advisor.enabled !== true) return null;
+  // 开关由调用方按 guidance 判断（旧 advisor.enabled 已折进 guidance.enabled）。
+  // 这里不再要求 advisor.enabled === true —— 否则 UI 只写 guidance 时永远拿不到路由。
+  if (!advisor || typeof advisor !== "object") return null;
   const explicit = normalizeRouteTarget(advisor.route);
   const fallback = cfg?.rewrite ? normalizeRouteTarget(cfg.rewrite) : null;
   const target = explicit ?? fallback ?? sessionRoute ?? null;
