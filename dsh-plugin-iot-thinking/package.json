@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-iot-thinking",
-  "version": "0.2.0",
-  "description": "IoT (Items of Thoughts) for DeepSeek Harness: rewrite the reasoning block inside llm/stream before the assistant message is committed. The rewrite is chosen per session / per agent preset from a strategy registry (decision nodes, long-range research, in-character voice), with no compaction checkpoint.",
+  "version": "0.3.0",
+  "description": "IoT (Items of Thoughts) for DeepSeek Harness: rewrite the reasoning block inside llm/stream before the assistant message is committed — decision-node compression per session / agent preset, offloadable to a cheaper route, plus an optional outside-observer advice layer ([旁观者建议]) that can run builtin or as a concurrent external model. No compaction checkpoint.",
   "type": "module",
   "main": "index.mjs",
   "exports": {
