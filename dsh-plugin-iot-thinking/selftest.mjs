@@ -28,7 +28,9 @@ import { compressThinking, EFFORT_PROBE, REWRITE_BUDGET, REWRITE_TIMEOUT } from 
 import { DEFAULTS } from "./lib/config-store.mjs";
 import {
   AUTO_EFFORT,
+  describeError,
   EFFORT_IDS,
+  errorCodeOf,
   isUnsupportedEffortFailure,
   knownEffortPlan,
   normalizeEffort,
@@ -92,6 +94,16 @@ const deps = (rewrite, overrides = {}) => ({
   rewrite,
   onEvent: () => {},
 });
+
+/**
+ * 真实宿主的 `createUserMessage` 要的是对象（content 数组）；直接传字符串会抛
+ * `content is not iterable`。测试替身必须同样严格 —— 否则这个 bug 测不出来。
+ */
+function strictCreateUserMessage(input) {
+  const content = input && typeof input === "object" && "content" in input ? input.content : input;
+  if (typeof content === "string") throw new TypeError("content is not iterable");
+  return { role: "user", content };
+}
 
 const source = () => chunks([start(), delta("abcde"), delta("fghij"), end("abcdefghij"), textDelta("hello"), finish()]);
 
@@ -351,7 +363,7 @@ await check("压缩器退化输出会严格重试，成功后返回新节点", a
         return this.text ? [{ type: "text", text: this.text }] : [];
       }
     },
-    createUserMessage: (input) => input,
+    createUserMessage: strictCreateUserMessage,
   };
   const ctx = {
     llm: {
@@ -388,7 +400,7 @@ await check("压缩器退化输出会严格重试，成功后返回新节点", a
 await check("退化草稿不调用模型，直接走确定性兜底", async () => {
   let calls = 0;
   const events = [];
-  const Llm = { BlockAssembler: class {}, createUserMessage: (input) => input };
+  const Llm = { BlockAssembler: class {}, createUserMessage: strictCreateUserMessage };
   const ctx = {
     llm: {
       stream: () => {
@@ -424,7 +436,7 @@ await check("非退化但 sanitize 后为空：不调模型，也不硬造节点
   assert.equal(sanitizeDraft(draft), "");
   let calls = 0;
   const events = [];
-  const Llm = { BlockAssembler: class {}, createUserMessage: (input) => input };
+  const Llm = { BlockAssembler: class {}, createUserMessage: strictCreateUserMessage };
   const ctx = {
     llm: {
       stream: () => {
@@ -669,7 +681,7 @@ const fakeLlm = () => ({
       return this.text ? [{ type: "text", text: this.text }] : [];
     }
   },
-  createUserMessage: (input) => input,
+  createUserMessage: strictCreateUserMessage,
 });
 
 const compressWith = (ctx, { cfg = {}, events = [], text = DRAFT } = {}) =>
@@ -1815,6 +1827,75 @@ await check("/iot 切换档位保留会话建议覆盖，/iot auto 也不清建�
   assert.deepEqual(store.load().sessions["s1"], { guidance: { enabled: true, mode: "builtin" } }, "auto 只清档位");
 });
 
+await check("建议调用超时必须返回：适配器不响应 abort 也不能把块挂死", async () => {
+  const events = [];
+  // 这个流永远不结束，也不理 abort —— 正是"任务卡住"的成因。
+  const ctx = { llm: { stream: () => (async function* () { await new Promise(() => {}); })() } };
+  const started = Date.now();
+  const raw = await advise({
+    ctx,
+    Llm: { BlockAssembler: class { push() {} blocks() { return []; } get finish() { return undefined; } }, createUserMessage: strictCreateUserMessage },
+    route: { provider: "p", model: "m" },
+    prompt: "x",
+    options: {},
+    timeoutMs: 200,
+    onEvent: (event, fields) => events.push({ event, ...fields }),
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(raw, null, "超时要返回 null，不能一直挂着");
+  assert.ok(elapsed < 1000, "应在超时附近返回（实际 " + elapsed + "ms）");
+  assert.ok(events.some((entry) => entry.event === "advisor-failed" && entry.code === "ADVISOR_TIMEOUT"));
+});
+
+await check("改写调用超时必须返回：不响应 abort 的流也要保留原文", async () => {
+  const events = [];
+  const ctx = { llm: { stream: () => (async function* () { await new Promise(() => {}); })() } };
+  const started = Date.now();
+  const result = await compressWith(ctx, {
+    cfg: { strategy: "iot-full", rewrite: { provider: "p", model: "m" }, rewriteTimeoutMs: 1000 },
+    events,
+    text: Array.from({ length: 60 }, (_, i) => "第" + i + "句草稿内容。").join(""),
+  });
+  const elapsed = Date.now() - started;
+  assert.equal(result, null, "超时要返回 null（保留原文）");
+  assert.ok(elapsed < 3000, "应在超时附近返回（实际 " + elapsed + "ms）");
+  assert.ok(events.some((entry) => entry.event === "thinking-failed" && entry.code === "REWRITE_TIMEOUT"));
+});
+
+await check("失败消息可读：对象形态的失败载荷不能变成 [object Object]", () => {
+  assert.equal(describeError({ message: "content is not iterable", code: "UNKNOWN" }), "content is not iterable");
+  assert.equal(describeError({ error: "boom" }), "boom");
+  assert.ok(describeError({ code: -4003, param: "temperature" }).includes("temperature"), "没有 message 时要序列化");
+  assert.equal(describeError("plain"), "plain");
+  assert.equal(describeError(new Error("real error")), "real error");
+  assert.ok(!describeError({ message: { nested: true } }).includes("[object Object]"), "嵌套对象也不能是 [object Object]");
+  assert.equal(errorCodeOf({ code: "INVALID_REQUEST" }), "INVALID_REQUEST");
+});
+
+await check("指导消息形态：必须与压缩调用一致（对象 + content 数组）", async () => {
+  const seen = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        seen.push(options.messages[0]);
+        const text = options.model === "strong" ? "[旁观者建议] 先补测试。" : "[决定] 先做替换闸门。";
+        return chunks([{ type: "text-delta", index: 0, text }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const cfg = {
+    strategy: "iot-full",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { route: { provider: "strong", model: "strong" } },
+    guidance: { enabled: true, mode: "external" },
+  };
+  const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2) });
+  assert.ok(result.advice, "外部建议要产出");
+  const advisorCall = seen.find((message) => message && message.role === "user" && Array.isArray(message.content));
+  assert.ok(advisorCall, "指导调用必须给 createUserMessage 一个对象形态的消息");
+  assert.equal(advisorCall.content[0].type, "text");
+});
+
 await check("debugChunks 能落盘：不在 DEFAULTS 之外的键不该被静默丢弃", () => {
   const dir = mkdtempSync(join(tmpdir(), "iot-debug-chunks-"));
   const store = new ConfigStore(join(dir, "config.json"));
@@ -2708,7 +2789,7 @@ function fakeRewriteLlm(reply) {
           .map((chunk) => ({ type: "text", text: chunk.text }));
       }
     },
-    createUserMessage: (input) => input,
+    createUserMessage: strictCreateUserMessage,
   };
   const ctx = {
     llm: {

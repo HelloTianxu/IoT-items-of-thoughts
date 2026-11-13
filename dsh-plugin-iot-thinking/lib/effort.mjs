@@ -111,3 +111,34 @@ export function combineSignals(controllerSignal, hostSignal) {
   }
   return controller.signal;
 }
+
+/**
+ * 把任意失败形态转成可读的一行。
+ *
+ * 宿主的失败载荷不一定是 Error：`finish.failure` 与代理层经常给一个**对象**
+ * （`{ message, code, param, cause }`）。直接 `String(error)` 会得到
+ * `[object Object]`，账本里就只剩这一句废话，完全没法定位。
+ */
+export function describeError(error) {
+  if (error === null || error === undefined) return "unknown";
+  if (typeof error === "string") return error.slice(0, 800);
+  if (error instanceof Error) return String(error.message || error.name || "Error").slice(0, 800);
+  if (typeof error !== "object") return String(error).slice(0, 800);
+  // 常见失败对象：优先取 message / error，其次序列化整个对象。
+  const message = error.message ?? error.error ?? error.reason ?? error.cause;
+  if (typeof message === "string" && message.trim()) return message.slice(0, 800);
+  try {
+    return JSON.stringify(error).slice(0, 800);
+  } catch {
+    return String(error).slice(0, 800);
+  }
+}
+
+/** 从失败载荷里取 code：对象形态与 Error 形态都认。 */
+export function errorCodeOf(error) {
+  if (error && typeof error === "object") {
+    if (typeof error.code === "string") return error.code;
+    if (typeof error.failure?.code === "string") return error.failure.code;
+  }
+  return undefined;
+}

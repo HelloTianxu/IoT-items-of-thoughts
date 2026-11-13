@@ -4,6 +4,8 @@
 import {
   AUTO_EFFORT,
   combineSignals,
+  describeError,
+  errorCodeOf,
   isUnsupportedEffortFailure,
   isUnsupportedTemperatureFailure,
   knownTemperaturePlan,
@@ -200,6 +202,8 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       controller?.abort?.();
     }, rewriteTimeoutMs);
     timer.unref?.();
+    /** 真正消费流的那一半；超时后它仍在后台跑，结果由竞速丢弃。 */
+    const consume = async () => {
     try {
       const stream = ctx.llm.stream({
         provider: target.provider,
@@ -236,16 +240,13 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         assembler.push(chunk);
       }
     } catch (error) {
-      clearTimeout(timer);
       return {
         error: timedOut
           ? `改写调用超时（${rewriteTimeoutMs} ms），已放弃这一块并保留原文`
-          : String(error?.message ?? error),
-        code: timedOut ? "REWRITE_TIMEOUT" : typeof error?.code === "string" ? error.code : undefined,
+          : describeError(error),
+        code: timedOut ? "REWRITE_TIMEOUT" : errorCodeOf(error),
         finish: assembler.finish,
       };
-    } finally {
-      clearTimeout(timer);
     }
     if (timedOut) {
       return {
@@ -256,12 +257,12 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     }
     const finish = assembler.finish;
     if (finish && finish.kind === "error") {
-      return { error: finish.failure?.message ?? "unknown", code: finish.failure?.code, finish };
+      return { error: describeError(finish.failure ?? "unknown"), code: finish.failure?.code, finish };
     }
     // 中断不是成功：当成"空输出"会把好块换成兜底内容。
     if (finish && finish.kind === "aborted") {
       return {
-        error: finish.failure?.message ?? "rewriter call aborted",
+        error: describeError(finish.failure ?? "rewriter call aborted"),
         code: finish.failure?.code ?? "ABORTED",
         finish,
       };
@@ -274,6 +275,29 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     lastUsage = usage;
     lastChunks = debugChunks;
     return { output, finish, usage, chunks: debugChunks };
+    };
+
+    // 与建议链同样的道理：abort 不保证适配器真的停下，`for await` 可能永远挂着。
+    // 用竞速兜底 —— 超时必须**返回**，不能让整块一直等。
+    let raceTimer = null;
+    const timeout = new Promise((resolve) => {
+      raceTimer = setTimeout(() => resolve({
+        error: `改写调用超时（${rewriteTimeoutMs} ms），已放弃这一块并保留原文`,
+        code: "REWRITE_TIMEOUT",
+        finish: assembler.finish,
+      }), rewriteTimeoutMs);
+    });
+    try {
+      const consumed = consume().catch((error) => ({
+        error: describeError(error),
+        code: errorCodeOf(error),
+        finish: assembler.finish,
+      }));
+      return await Promise.race([consumed, timeout]);
+    } finally {
+      clearTimeout(raceTimer);
+      clearTimeout(timer);
+    }
   };
 
   /**
@@ -297,7 +321,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         index,
         provider: target.provider,
         model: target.model,
-        message: String(error?.message ?? error),
+        message: describeError(error),
       });
       return { answered: false, effort: null };
     }

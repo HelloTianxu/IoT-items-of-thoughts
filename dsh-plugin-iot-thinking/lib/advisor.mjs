@@ -13,6 +13,8 @@ import { normalizeRouteTarget } from "./route.mjs";
 import {
   AUTO_EFFORT,
   combineSignals,
+  describeError,
+  errorCodeOf,
   isUnsupportedEffortFailure,
   isUnsupportedTemperatureFailure,
   knownTemperaturePlan,
@@ -176,6 +178,12 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
   }, timeoutMs);
   timer.unref?.();
 
+  // 超时必须是**竞速**而不是"只发 abort"：适配器的异步迭代器不一定响应 abort，
+  // 一旦它不响应，`for await` 会永远挂着，collectAdvice 的 await 就永不返回 ——
+  // 整块不输出，用户看到的就是"任务卡住"。这里用 deadline 兜底。
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  const remaining = () => Math.max(0, deadline - Date.now());
+
   const { mode, key, send } = await effortForAdvisor({ ctx, route, requested: effort, options, onEvent });
   // 指导模型的 temperature 同样按路由记住：只接受默认值的模型不能每块白试一次。
   const tempKey = temperaturePlanKey(route.provider, route.model, "advisor");
@@ -186,11 +194,20 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
   const callOnce = async (effortSent, tempSent) => {
     const assembler = new Llm.BlockAssembler();
     let usage = null;
+    /** 真正消费流的那一半；超时后它仍在后台跑，结果由竞速丢弃。 */
+    const consume = async () => {
     try {
       const stream = ctx.llm.stream({
         provider: route.provider,
         model: route.model,
-        messages: [Llm.createUserMessage(prompt)],
+        // 与压缩调用同一形态：`createUserMessage` 在宿主里要的是对象（content 数组），
+        // 直接传字符串会抛 `content is not iterable` —— 这就是"开了外部建议却什么都没有"。
+        messages: [
+          Llm.createUserMessage({
+            content: [{ type: "text", text: prompt }],
+            source: { kind: "plugin", plugin: "iot-thinking" },
+          }),
+        ],
         // 输出预算按建议字数推算：中文 1 字 ≈ 1.5~2 token，固定 800 会在 maxChars=600 时截断。
         maxTokens: Number.isFinite(maxTokens) ? Math.max(200, Math.floor(maxTokens)) : 1200,
         ...(tempSent === null ? {} : { temperature: tempSent }),
@@ -204,8 +221,8 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
       }
     } catch (error) {
       return {
-        error: timedOut ? `指导调用超时（${timeoutMs} ms）` : String(error?.message ?? error),
-        code: timedOut ? "ADVISOR_TIMEOUT" : error?.code,
+        error: timedOut ? `指导调用超时（${timeoutMs} ms）` : describeError(error),
+        code: timedOut ? "ADVISOR_TIMEOUT" : errorCodeOf(error),
         usage,
         finish: assembler.finish,
         effortSent,
@@ -213,10 +230,10 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
     }
     const finish = assembler.finish;
     if (finish && finish.kind === "error") {
-      return { error: finish.failure?.message ?? "unknown", code: finish.failure?.code, usage, finish, effortSent };
+      return { error: describeError(finish.failure ?? "unknown"), code: finish.failure?.code, usage, finish, effortSent };
     }
     if (finish && finish.kind === "aborted") {
-      return { error: finish.failure?.message ?? "指导调用被中断", code: finish.failure?.code ?? "ABORTED", usage, finish, effortSent };
+      return { error: describeError(finish.failure ?? "指导调用被中断"), code: finish.failure?.code ?? "ABORTED", usage, finish, effortSent };
     }
     const raw = assembler
       .blocks()
@@ -224,6 +241,31 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
       .map((block) => block.text)
       .join("\n");
     return { raw, usage, finish, effortSent };
+    };
+
+    const ms = remaining();
+    if (ms <= 0) {
+      return { error: `指导调用超时（${timeoutMs} ms）`, code: "ADVISOR_TIMEOUT", usage, finish: assembler.finish, effortSent };
+    }
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      // 这个 timer **不能 unref**：流挂住时事件循环可能只剩它一个句柄，
+      // unref 掉就永远不会触发，竞速也就永远不会 resolve。
+      timer = setTimeout(() => resolve({ error: `指导调用超时（${timeoutMs} ms）`, code: "ADVISOR_TIMEOUT", usage, finish: assembler.finish, effortSent }), ms);
+    });
+    try {
+      // 输掉竞速的那一半仍在后台消费流：加 catch 防未处理 rejection。
+      const consumed = consume().catch((error) => ({
+        error: describeError(error),
+        code: errorCodeOf(error),
+        usage,
+        finish: assembler.finish,
+        effortSent,
+      }));
+      return await Promise.race([consumed, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 
   let result = await callOnce(send, temperatureToSend);
