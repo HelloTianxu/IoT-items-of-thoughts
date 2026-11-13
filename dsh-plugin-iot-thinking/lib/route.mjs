@@ -163,6 +163,29 @@ export function resolveConfig(cfg, who = {}) {
     }
   }
 
+  // 指导开关与模式：显式配置优先；没有配置时，指导档位（iot-guided）等价于
+  // 内置指导模式 —— 旧配置的行为保持不变。session 覆盖在 resolveConfig 之前
+  // 已经折进 cfg.guidance，这里只做"档位推断"这一层兜底。
+  const guidanceRaw = base.guidance && typeof base.guidance === "object" ? base.guidance : null;
+  const globalGuidance = guidanceRaw
+    ? { enabled: guidanceRaw.enabled === true, mode: guidanceRaw.mode === "builtin" ? "builtin" : "external" }
+    : route.id === "iot-guided"
+      ? { enabled: true, mode: "builtin" }
+      : { enabled: false, mode: "external" };
+  // 会话级指导覆盖：null = 跟随全局；只给 enabled 时 mode 继承全局。
+  const sessionGuidance = who.sessionId && base.sessions && typeof base.sessions === "object"
+    ? base.sessions[who.sessionId]
+    : undefined;
+  const sessionOverride = sessionGuidance && typeof sessionGuidance === "object" && !Array.isArray(sessionGuidance)
+    ? sessionGuidance.guidance
+    : undefined;
+  const guidance = sessionOverride === null || sessionOverride === undefined
+    ? globalGuidance
+    : {
+        enabled: typeof sessionOverride.enabled === "boolean" ? sessionOverride.enabled : globalGuidance.enabled,
+        mode: sessionOverride.mode === "builtin" || sessionOverride.mode === "external" ? sessionOverride.mode : globalGuidance.mode,
+      };
+
   // custom 档位的输出约束：只对自定义预设生效（三档基础模式有自己的节点预算）。
   if (route.id === "custom") {
     if (Number.isFinite(base.maxOut)) limits.maxOut = Math.max(0, Math.floor(base.maxOut));
@@ -174,6 +197,7 @@ export function resolveConfig(cfg, who = {}) {
     ...base,
     strategy: route.id,
     route,
+    guidance,
     limits,
     minChars: Number.isFinite(limits.minChars) ? Math.max(0, limits.minChars) : 0,
     maxChars: Number.isFinite(limits.maxChars) ? Math.max(1, limits.maxChars) : 24000,

@@ -46,6 +46,17 @@ export const DEFAULTS = Object.freeze({
    * 指导层：压缩之后让另一个模型看骨架并给建议。
    * 与压缩档位正交 —— 压缩是减 token，指导是加信息。
    */
+  /**
+   * 指导：与压缩档位正交的开关与模式。
+   * - enabled：是否对会话启用指导（全局默认，session 可覆盖）；
+   * - mode：`builtin`（压缩器自己输出 [指导]）或 `external`（并发调用外部强模型）。
+   * `advisor` 保留为外部指导的路由与预算配置；`advisor.enabled` 是旧的开关别名，
+   * 迁移时折进 guidance.enabled。
+   */
+  guidance: {
+    enabled: false,
+    mode: "external",
+  },
   advisor: {
     enabled: false,
     route: { provider: null, model: null },
@@ -123,20 +134,47 @@ function strategyMap(value) {
     if (typeof key !== "string" || !key) continue;
     const normalized = normalizeRouteEntry(entry);
     if (!normalized) continue;
+    // 会话级指导覆盖：对象形态 `{ ..., guidance: { enabled, mode } }`。
+    // `null` 表示"跟随全局"，必须原样保留，不能当成没配。
+    const sessionGuidance = entry && typeof entry === "object" && !Array.isArray(entry) && "guidance" in entry
+      ? sessionGuidanceValue(entry.guidance)
+      : undefined;
+    const withGuidance = (base) => (sessionGuidance === undefined
+      ? base
+      : { ...(typeof base === "object" ? base : { strategy: base }), guidance: sessionGuidance });
     // 自定义预设：`custom:名字` 要保住名字（那是 presetDir 里的文件名）；
     // 会话级 prompt 是对象形态 `{ strategy: "custom", preset }`，也原样保留 ——
     // 否则"选了 prompt"会在下一次 load 时被归一成字符串丢掉。
     if (normalized.id === "custom") {
       if (normalized.builtin) {
-        out[key] = { strategy: "custom", preset: `builtin:${normalized.builtin}` };
+        out[key] = withGuidance({ strategy: "custom", preset: `builtin:${normalized.builtin}` });
         continue;
       }
-      out[key] = normalized.custom ? `custom:${normalized.custom}` : "custom";
+      out[key] = withGuidance(normalized.custom ? `custom:${normalized.custom}` : "custom");
       continue;
     }
-    out[key] = normalized.id;
+    out[key] = withGuidance(normalized.id);
   }
   return out;
+}
+
+/** 会话级指导覆盖：`null` = 跟随全局；对象只收 enabled/mode。 */
+function sessionGuidanceValue(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out = {};
+  if (typeof value.enabled === "boolean") out.enabled = value.enabled;
+  if (value.mode === "builtin" || value.mode === "external") out.mode = value.mode;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** 指导开关与模式：旧 `advisor.enabled` 折进 `guidance.enabled`，避免两份开关互相打架。 */
+function guidanceConfig(value, advisor) {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const legacyOn = advisor?.enabled === true;
+  const enabled = typeof raw.enabled === "boolean" ? raw.enabled : legacyOn;
+  const mode = raw.mode === "builtin" ? "builtin" : raw.mode === "external" ? "external" : "external";
+  return { enabled, mode };
 }
 
 /** 指导层配置：开关、路由、超时与条数上限；非法值一律落回安全默认。 */
@@ -214,6 +252,7 @@ function merge(base, overlay) {
   out.sessions = strategyMap(out.sessions);
   out.rewrite = rewriteConfig(out.rewrite);
   out.advisor = advisorConfig(out.advisor);
+  out.guidance = guidanceConfig(out.guidance, out.advisor);
   out.builtinOverrides = builtinOverridesMap(out.builtinOverrides);
   return out;
 }
@@ -264,6 +303,10 @@ export class ConfigStore {
     // 否则浅合并会把没提到的字段一起抹掉 —— 用户会看到"保存完 provider 没了"。
     if (current?.rewrite && typeof current.rewrite === "object" && next?.rewrite && typeof next.rewrite === "object") {
       overlay.rewrite = { ...current.rewrite, ...next.rewrite };
+    }
+    // guidance 是嵌套块：只改 mode 不能把 enabled 抹掉（反之亦然）。
+    if (current?.guidance && typeof current.guidance === "object" && next?.guidance && typeof next.guidance === "object") {
+      overlay.guidance = { ...current.guidance, ...next.guidance };
     }
     // advisor 同样有嵌套 route：增量改开关不能把已配的 provider/model 抹掉。
     if (current?.advisor && typeof current.advisor === "object" && next?.advisor && typeof next.advisor === "object") {

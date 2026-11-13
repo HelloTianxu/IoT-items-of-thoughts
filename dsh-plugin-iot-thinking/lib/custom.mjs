@@ -137,7 +137,7 @@ export function resetPresetCache() {
  * 压缩而不是在继续思考"的唯一可机检信号。预设里写 `{{draft}}` 时，标签层
  * 仍然放在最前面，草稿填在预设正文的位置。
  */
-export function buildCustomPrompt(presetText, draft, { strict = false, reason = null, detail = null, limits = null } = {}) {
+export function buildCustomPrompt(presetText, draft, { strict = false, reason = null, detail = null, limits = null, allowAdvice = false } = {}) {
   const body = String(presetText ?? "").trim();
   const text = String(draft ?? "");
   if (!body) return "";
@@ -148,6 +148,15 @@ export function buildCustomPrompt(presetText, draft, { strict = false, reason = 
     "",
     INSTRUCTIONS.full,
   ].join("\n");
+  const adviceRule = allowAdvice
+    ? [
+        "",
+        "指导要求（本次开启）：在压缩节点之后，额外输出 1~2 条 [指导]，以教师身份给建议——",
+        "不是命令，而是「还可以从哪个角度看」「哪里可能漏了检查」「下一步值得先做什么」。",
+        "建议必须能在这份草稿内部闭环：不要假设你了解更早的对话或项目历史。",
+        "[指导] 不计入压缩节点预算；宁可只给一条真正有用的，也不要凑数。",
+      ].join("\n")
+    : "";
   const tail = [
     "",
     "<thinking>",
@@ -156,6 +165,7 @@ export function buildCustomPrompt(presetText, draft, { strict = false, reason = 
     "",
     "现在只输出思维节点（每行以 [标签] 开头，节点之间空一行），不要输出任何解释、前言或后续计划。",
     outputDiscipline(limits),
+    adviceRule,
     retry,
   ].filter((line) => line !== "").join("\n");
   if (body.includes("{{draft}}")) {

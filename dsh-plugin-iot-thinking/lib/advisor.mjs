@@ -116,7 +116,7 @@ export function formatAdvice(raw, limits = {}) {
  * 一次指导调用。失败一律返回 null —— 指导是**增强**，不是必需；
  * 它挂了不该影响这一块的压缩结果，也不该阻塞主流程。
  */
-export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent }) {
+export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace }) {
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const signal = controller?.signal ?? options?.signal;
   let timedOut = false;
@@ -170,6 +170,20 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
     .filter((block) => block && block.type === "text" && typeof block.text === "string")
     .map((block) => block.text)
     .join("\n");
+  // 自测留痕：指导这一路也记下实际 prompt 与正文输出，Log 窗口才能比对两路。
+  if (Array.isArray(trace) && trace.length < 8) {
+    trace.push({
+      stage: "advisor",
+      provider: route.provider,
+      model: route.model,
+      prompt,
+      raw,
+      finish: finish?.kind ?? null,
+      usage,
+      error: null,
+      code: null,
+    });
+  }
   const reasoningTokens = Number(usage?.completion_tokens_details?.reasoning_tokens ?? usage?.reasoning_tokens);
   const completionTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
   onEvent?.("advisor-usage", {

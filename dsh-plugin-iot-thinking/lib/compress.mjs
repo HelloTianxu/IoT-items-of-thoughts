@@ -89,6 +89,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   const strategy = strategyById(cfg.strategy) ?? strategyById(DEFAULT_STRATEGY);
   const limits = cfg.limits ?? limitsOf(strategy.id, cfg.strategies?.[strategy.id]);
   const recent = Array.isArray(extra?.recent) ? extra.recent : [];
+  const trace = Array.isArray(extra?.trace) ? extra.trace : null;
 
   // 改写器路由：档位覆盖 > rewrite 块 > 跟随当前请求。必须在钩子内部解析，
   // 因为档位是按会话/preset 选出来的，路由得跟着档位走。
@@ -414,13 +415,20 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
    * 两路结果合并成最终的 think 内容。并发是为了不让指导的延迟叠加到压缩上；
    * 指导失败只丢指导，压缩结果照常返回。
    */
+  // 指导开关与模式来自配置（全局默认 + 会话覆盖）。直接传 cfg 的调用方
+  // （测试、自测路由）可能没有 guidance 字段：按档位推断 —— 指导档等于内置指导，
+  // 其余档默认关闭，与旧行为一致。
+  const guidance = cfg.guidance
+    ?? (Array.isArray(strategy.labels) && strategy.labels.includes("指导")
+      ? { enabled: true, mode: "builtin" }
+      : { enabled: false, mode: "external" });
+  const guidanceOn = guidance.enabled === true;
+
   const startAdvice = () => {
-    // 模式一（档位内 [指导]）与模式二（外部指导）互斥：同一块不该出现两份指导。
-    // 要外部指导就把档位切回普通压缩档。
-    if (Array.isArray(strategy.labels) && strategy.labels.includes("指导")) {
-      if (cfg.advisor?.enabled === true) {
-        mark("advisor-skipped", { index, strategy: strategy.id, reason: "guided-tier" });
-      }
+    if (!guidanceOn) return null;
+    // 外部指导模式：并发调用强模型。内置指导模式由提示词负责，不发第二路。
+    if (guidance.mode !== "external") {
+      mark("advisor-skipped", { index, strategy: strategy.id, reason: "builtin-mode" });
       return null;
     }
     const advisorRoute = resolveAdvisorRoute(cfg, strategy.id, sessionRoute);
@@ -449,6 +457,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       prompt,
       options,
       timeoutMs,
+      trace,
       onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
     }).then((raw) => {
       // 空输出/截断的原因已经由 advise 自己记账（advisor-skipped），这里不再重复。
@@ -500,12 +509,29 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       state,
       // 三档基础模式没有"预设正文"，用贴入的文本充当用户补充层。
       extraPrompt: cfg.customText ?? "",
+      // 内置指导模式：让压缩器自己在输出里加 [指导]。
+      allowAdvice: guidanceOn && guidance.mode === "builtin",
     });
     if (!instruction) {
       mark("thinking-skipped", { index, strategy: strategy.id, reason: "no-prompt", stage });
       return { done: true, value: null };
     }
     let result = await attempt(instruction, temperatureForCall, stage, active);
+    // 自测的报文留痕：记录这次实际发出的提示词、原始输出、finish 与 usage，
+    // 供设置卡的 Log 窗口比对。正常链路上 trace 为 undefined，零开销。
+    if (Array.isArray(trace) && trace.length < 8) {
+      trace.push({
+        stage,
+        provider: active.provider,
+        model: active.model,
+        prompt: instruction,
+        raw: String(result.output ?? ""),
+        finish: result.finish?.kind ?? null,
+        usage: result.usage ?? null,
+        error: result.error ?? null,
+        code: result.code ?? null,
+      });
+    }
 
     // 卸载路由失败（网络、鉴权、模型不存在、供应商 5xx）时，按配置回退到会话路由
     // 再试一次。只回退一次，且用户按 Esc 中断不重试 —— 中断是用户的决定，不是路由的错。

@@ -156,23 +156,21 @@ sessions: {
 - 旧形态 `"custom:名字"` 字符串仍读得懂；新写入统一成对象形态。
 - 未知内置名会被拒绝（400），不会静默落盘。
 
-### 指导（两种模式）
+### 指导（两种模式 + 会话开关）
 
-指导是**建议型**的：它给当前工作模型额外的思路与视角，不是命令。
+指导是**建议型**的：给当前工作模型额外的思路与视角，不是命令。
 
-**模式一：指导档（`iot-guided`）**
-压缩器在同一次调用里兼任教师：除压缩节点外，额外输出 1~2 条 `[指导]`。
-本质仍是压缩（一次调用、一份输出），成本与"完整"档相同。`[指导]` 不参与节点预算，
-不会挤掉 `[决定]` 这类关键节点。
+**模式一：内置指导**（`guidance.mode = "builtin"`）
+压缩器在同一次调用里兼任教师，额外输出 1~2 条 `[指导]`。本质仍是压缩，成本与普通档相同；
+`[指导]` 不参与节点预算。
 
-**模式二：外部指导（`advisor`）**
-与压缩**并发**两路：一路把原始 thinking 草稿发给压缩模型，一路把同一份草稿发给一个
-更强的模型；两路结果合并成最终的 think 内容。强模型只看 thinking，不看完整对话 ——
-比"整段上下文喂强模型"便宜得多。
+**模式二：外部指导**（`guidance.mode = "external"`）
+与压缩并发两路：原始 thinking 草稿同时发给压缩模型和一个更强的模型，两路结果合并。
+强模型只看 thinking，不看完整对话。
 
 ```jsonc
+"guidance": { "enabled": true, "mode": "external" },
 "advisor": {
-  "enabled": true,
   "route": { "provider": "strong-provider", "model": "strong-model" },
   "maxAdvice": 3,
   "maxChars": 600,
@@ -180,17 +178,25 @@ sessions: {
 }
 ```
 
-- **两种模式互斥**：指导档已经自带 `[指导]`，再开外部指导会得到两份指导；
-  切到指导档时外部指导自动跳过（记 `advisor-skipped: guided-tier`）。
-- **并发不叠加延迟**：指导与压缩同时发出；指导失败只丢指导，压缩结果照常返回。
-- **建议要可执行**：提示词要求"不复述已有内容、没有值得说的就少说"，格式闸门只留
-  带标签、不重复、够长的行。
-- **不参与节点预算**：外部指导追加在压缩结果末尾，用 `[指导]` 隔开。
+**优先级**：`sessions[会话] > guidance`。设置里开启后，新会话默认继承；会话内还能单独改：
 
-事件：`advisor-called` / `advisor-ready` / `advisor-injected` / `advisor-skipped` / `advisor-failed`。
+```jsonc
+"sessions": {
+  "<sessionId>": { "strategy": "iot-full", "guidance": { "enabled": true, "mode": "builtin" } }
+}
+```
 
-⚠️ 指导模型与工作模型相同（或同源）时收益有限，甚至只是自我确认；要发挥"老师"作用，
-应指向一个**不同的、更强的**模型。
+- `guidance: null` = 跟随全局；
+- 只写 `enabled` 时模式继承全局；
+- 清除档位不会清掉指导覆盖，除非显式传 `guidance: null`。
+
+**自测**：设置卡可以点名测「内置指导」或「外部指导」，返回的报文日志（trace）包含每次调用
+实际发出的提示词、原始输出、finish 与 usage，便于比对两路行为。
+
+事件：`advisor-called` / `advisor-ready` / `advisor-injected` / `advisor-skipped` / `advisor-failed` /
+`advisor-usage`。
+
+⚠️ 指导模型与工作模型相同（或同源）时收益有限；要发挥"老师"作用，应指向一个**不同的、更强的**模型。
 
 ### 压缩器路由（算力卸载）
 

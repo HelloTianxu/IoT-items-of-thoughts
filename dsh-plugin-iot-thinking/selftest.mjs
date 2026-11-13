@@ -65,7 +65,7 @@ async function check(name, fn) {
     console.log(`ok   ${name}`);
   } catch (error) {
     failures += 1;
-    console.log(`FAIL ${name}\n     ${error.message}`);
+    console.log(`FAIL ${name}\n     ${error.stack ?? error.message}`);
   }
 }
 
@@ -1823,7 +1823,7 @@ await check("模式一与模式二互斥：指导档下不再发外部指导", a
   };
   const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
   assert.equal(calls.length, 1, "指导档只调用压缩器，不再打强模型");
-  assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "guided-tier"));
+  assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "builtin-mode"));
   assert.equal(result.advice ?? null, null);
 });
 
@@ -1845,6 +1845,7 @@ await check("指导层：关闭时不调用，开启时调用强模型并给出�
     strategy: "custom",
     rewrite: { provider: "weak", model: "weak", fallback: "keep" },
     advisor: { enabled: true, route: { provider: "strong", model: "strong" }, maxAdvice: 3, maxChars: 600 },
+    guidance: { enabled: true, mode: "external" },
     limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" },
   };
   const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak", sessionId: "s" } });
@@ -1862,6 +1863,7 @@ await check("指导层：关闭时不多打一次模型", async () => {
     strategy: "custom",
     rewrite: { provider: "weak", model: "weak" },
     advisor: { enabled: false },
+    guidance: { enabled: false, mode: "external" },
     limits: { ...limitsOf("custom"), preset: { inline: "压短", name: "inline" }, acceptRule: "different" },
   };
   await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak" } });
@@ -2660,6 +2662,93 @@ await check("config API：映射表是整表替换 —— 删除与清空都能�
     body: JSON.stringify({ agentPresets: { jingjing: "custom:my-style" } }),
   });
   assert.deepEqual(custom.payload.config.agentPresets, { jingjing: "custom:my-style" });
+});
+
+await check("指导：会话覆盖优先于全局，null 表示跟随全局", () => {
+  const global = resolveConfig({ strategy: "iot-full", guidance: { enabled: true, mode: "external" } }, { sessionId: "s" });
+  assert.deepEqual(global.guidance, { enabled: true, mode: "external" });
+
+  const off = resolveConfig({
+    strategy: "iot-full",
+    guidance: { enabled: true, mode: "external" },
+    sessions: { s: { strategy: "iot-full", guidance: { enabled: false } } },
+  }, { sessionId: "s" });
+  assert.equal(off.guidance.enabled, false, "会话可以关掉指导");
+  assert.equal(off.guidance.mode, "external", "只给 enabled 时模式继承全局");
+
+  const follow = resolveConfig({
+    strategy: "iot-full",
+    guidance: { enabled: true, mode: "builtin" },
+    sessions: { s: { strategy: "iot-full", guidance: null } },
+  }, { sessionId: "s" });
+  assert.deepEqual(follow.guidance, { enabled: true, mode: "builtin" }, "null 跟随全局");
+
+  const builtin = resolveConfig({
+    strategy: "iot-full",
+    guidance: { enabled: true, mode: "external" },
+    sessions: { s: { strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } } },
+  }, { sessionId: "s" });
+  assert.equal(builtin.guidance.mode, "builtin", "会话可以切模式");
+});
+
+await check("指导档位在没有显式配置时等价于内置指导，旧行为不变", () => {
+  const guided = resolveConfig({ strategy: "iot-guided" }, { sessionId: "s" });
+  assert.deepEqual(guided.guidance, { enabled: true, mode: "builtin" });
+  const plain = resolveConfig({ strategy: "iot-full" }, { sessionId: "s" });
+  assert.equal(plain.guidance.enabled, false, "普通档默认不开指导");
+});
+
+await check("session API：指导覆盖与档位分开落盘，清除档位不丢指导", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-session-guidance-")), "config.json"));
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const put = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s-guidance", strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } }),
+  });
+  assert.equal(put.statusCode, 200);
+  assert.deepEqual(put.payload.override, { strategy: "iot-full", guidance: { enabled: true, mode: "builtin" } });
+
+  const get = await ws.call("/iot-thinking/api/session", { url: "/iot-thinking/api/session?sessionId=s-guidance" });
+  assert.deepEqual(get.payload.override.guidance, { enabled: true, mode: "builtin" }, "GET 要能还原指导覆盖");
+  assert.equal(get.payload.guidance.effective.mode, "builtin");
+
+  // 只清档位：指导覆盖必须留着。
+  const cleared = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s-guidance", strategy: null }),
+  });
+  assert.deepEqual(cleared.payload.override, { guidance: { enabled: true, mode: "builtin" } });
+
+  // 再清指导：整条覆盖消失。
+  const gone = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s-guidance", strategy: null, guidance: null }),
+  });
+  assert.equal(gone.payload.override, null);
+});
+
+await check("自测路由：返回报文 trace 与本次指导模式，便于 Log 窗口比对", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-test-trace-")), "config.json"));
+  store.save({ strategy: "iot-full", rewrite: { provider: "p", model: "m" }, guidance: { enabled: true, mode: "external" } });
+  registerConfigApi(testCtx(ws), store, {
+    rewrite: async (text, options, cfg, index, extra) => {
+      extra?.trace?.push({ stage: "first", provider: "p", model: "m", prompt: "PROMPT", raw: "RAW", finish: "stop", usage: null, error: null, code: null });
+      return { text: "[决定] 甲。", event: { strategy: "iot-full", finish: "stop" } };
+    },
+    getRoute: () => ({ provider: "p", model: "m" }),
+  });
+
+  const res = await ws.call("/iot-thinking/api/test", {
+    method: "POST",
+    body: JSON.stringify({ strategy: "iot-full", guidance: { enabled: true, mode: "builtin" }, text: DRAFT.repeat(3) }),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.payload.guidance, { enabled: true, mode: "builtin" }, "自测要能点名指导模式");
+  assert.equal(res.payload.trace[0].prompt, "PROMPT");
+  assert.equal(res.payload.trace[0].raw, "RAW");
 });
 
 await check("session API：会话级 prompt 与档位一起落盘，未知内置名被拒", async () => {

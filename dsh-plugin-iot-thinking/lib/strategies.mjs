@@ -61,8 +61,8 @@ function itemsStrategy({ id, label, profile, summary, defaults }) {
     skipInput: (draft) => (isDegenerateDraft(draft) || !sanitizeDraft(draft).trim() ? "degenerate-input" : null),
     // 用户补充层：三档基础模式也接受一段用户文本作为标签补充。
     // 空文本时行为与旧版完全一致（不注入任何额外要求）。
-    buildPrompt: (draft, { strict, limits, extraPrompt }) =>
-      buildCompressionPrompt(draft, { profile, strict, limits, extraPrompt }),
+    buildPrompt: (draft, { strict, limits, extraPrompt, allowAdvice }) =>
+      buildCompressionPrompt(draft, { profile, strict, limits, extraPrompt, allowAdvice }),
     finalize: (raw, { limits }) => {
       // 先看原始输出：formatNodes 会把退化输出整理得"看起来正常"。
       const rawDegenerate = isDegenerateItems(raw);
@@ -124,8 +124,8 @@ function customStrategy() {
       return { state: { text: loaded.text, label: preset.name }, error: null };
     },
     skipInput: (draft) => (String(draft ?? "").trim() ? null : "empty-draft"),
-    buildPrompt: (draft, { strict, reason, detail, state, limits }) =>
-      buildCustomPrompt(state?.text ?? "", draft, { strict, reason, detail, limits }),
+    buildPrompt: (draft, { strict, reason, detail, state, limits, allowAdvice }) =>
+      buildCustomPrompt(state?.text ?? "", draft, { strict, reason, detail, limits, allowAdvice }),
     finalize: (raw, { original, limits }) => {
       // 必须带上 text：引擎在成功分支里读 verdict.text（items 档位也是这么返回的）。
       const out = String(raw ?? "").trim();

@@ -452,6 +452,7 @@ export function buildCompressionPrompt(reasoning, options = {}) {
   const instruction = INSTRUCTIONS[profile] ?? IOT_INSTRUCTION;
   const budget = BUDGETS[profile] ?? BUDGETS.full;
   const extra = String(options.extraPrompt ?? "").trim();
+  const allowAdvice = options.allowAdvice === true;
   const strict = options.strict
     ? [
         "",
@@ -464,6 +465,15 @@ export function buildCompressionPrompt(reasoning, options = {}) {
     "",
     instruction,
     ...(extra ? ["", "用户补充要求（只能补充，不能替掉上面的标签规则）：", extra] : []),
+    ...(allowAdvice
+      ? [
+          "",
+          "指导要求（本次开启）：在压缩节点之后，额外输出 1~2 条 [指导]，以教师身份给建议——",
+          "不是命令，而是「还可以从哪个角度看」「哪里可能漏了检查」「下一步值得先做什么」。",
+          "建议必须能在这份草稿内部闭环：不要假设你了解更早的对话或项目历史。",
+          "[指导] 不计入压缩节点预算；宁可只给一条真正有用的，也不要凑数。",
+        ]
+      : []),
     "",
     "草稿中可能残留上一轮的 [标签] 行，或含有“好/现在/写/结束”这类退化词；这些是噪声，不是输出模板。不要续写、不要模仿，只提取判断/事实/计划。",
     "",
@@ -642,7 +652,9 @@ export function formatNodes(text, options = {}) {
 
   // 指导节点不参与压缩节点的预算与优先级：它是"教师补充"，不该挤掉 [决定]。
   // 先摘出来，压缩节点照常截断，最后再接回去（最多 2 条）。
-  const adviceNodes = profile.id === "guided"
+  // 允许指导：档位自带（guided）或本次调用显式开启（guidance.mode === "builtin"）。
+  const allowAdvice = options.allowAdvice === true || profile.id === "guided";
+  const adviceNodes = allowAdvice
     ? nodes.filter((node) => labelOf(node) === "[指导]").slice(0, 2)
     : [];
   if (adviceNodes.length) {

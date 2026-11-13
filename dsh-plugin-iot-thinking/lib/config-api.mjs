@@ -301,6 +301,15 @@ function sanitize(payload) {
     else if (entry?.id === "custom" && entry.custom) next.defaultPreset = `custom:${entry.custom}`;
     else if (raw === "custom") next.defaultPreset = "custom";
   }
+  // 指导开关与模式：enabled 控制是否启用，mode 控制内置（压缩器自己输出 [指导]）
+  // 还是外部（并发调用强模型）。旧卡片只发 advisor.enabled 时也折进来。
+  if (payload.guidance !== undefined) {
+    const raw = payload.guidance && typeof payload.guidance === "object" && !Array.isArray(payload.guidance) ? payload.guidance : {};
+    const out = {};
+    if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+    if (raw.mode === "builtin" || raw.mode === "external") out.mode = raw.mode;
+    next.guidance = out;
+  }
   // 指导层：开关、路由、超时与条数上限。route 留空 = 跟随压缩器路由。
   if (payload.advisor !== undefined) {
     const raw = payload.advisor && typeof payload.advisor === "object" && !Array.isArray(payload.advisor) ? payload.advisor : {};
@@ -693,6 +702,11 @@ function doRegister(ctx, ws, store, deps = {}) {
           choices: valueChoices(cfg),
           /** 这个会话自己那条覆盖（没配就是 null）。 */
           override: cfg.sessions?.[sessionId] ?? null,
+          /** 指导：全局默认 + 本会话解析后的实际值（头部下拉要用）。 */
+          guidance: {
+            global: cfg.guidance ?? { enabled: false, mode: "external" },
+            effective: effective.guidance ?? null,
+          },
           /** 它所属 preset 的映射（没配就是 null）。 */
           presetStrategy: agentPreset ? cfg.agentPresets?.[agentPreset] ?? null : null,
         });
@@ -740,11 +754,44 @@ function doRegister(ctx, ws, store, deps = {}) {
         }
         const cfg = store.load();
         const sessions = { ...(cfg.sessions ?? {}) };
+        // 会话级指导覆盖：与档位独立。`null` = 跟随全局；不传 = 保持原值。
+        const hasGuidance = payload.guidance !== undefined;
+        let guidancePatch;
+        if (hasGuidance) {
+          if (payload.guidance === null) guidancePatch = null;
+          else if (payload.guidance && typeof payload.guidance === "object" && !Array.isArray(payload.guidance)) {
+            const nextGuidance = {};
+            if (typeof payload.guidance.enabled === "boolean") nextGuidance.enabled = payload.guidance.enabled;
+            if (payload.guidance.mode === "builtin" || payload.guidance.mode === "external") nextGuidance.mode = payload.guidance.mode;
+            guidancePatch = Object.keys(nextGuidance).length ? nextGuidance : undefined;
+          }
+        }
+        const existing = sessions[sessionId];
+        const existingGuidance = existing && typeof existing === "object" && !Array.isArray(existing) ? existing.guidance : undefined;
         // `null` = 回到"跟随 preset / 全局默认"，这正是"清除本会话覆盖"的语义。
-        if (!entry) delete sessions[sessionId];
-        else if (entry.id === "custom" && entry.builtin) sessions[sessionId] = { strategy: "custom", preset: `builtin:${entry.builtin}` };
-        else if (entry.id === "custom") sessions[sessionId] = entry.custom ? `custom:${entry.custom}` : "custom";
-        else sessions[sessionId] = entry.id;
+        if (!entry) {
+          // 清档位不等于清整条覆盖：指导是独立开关，除非显式传 guidance:null，
+          // 否则已有指导覆盖要留着。
+          const keptGuidance = guidancePatch === undefined ? existingGuidance : guidancePatch;
+          // null 与 undefined 都表示"跟随全局"：没有档位时整条覆盖没有意义。
+          if (keptGuidance === undefined || keptGuidance === null) delete sessions[sessionId];
+          else sessions[sessionId] = { guidance: keptGuidance };
+        } else {
+          const base = entry.id === "custom" && entry.builtin
+            ? { strategy: "custom", preset: `builtin:${entry.builtin}` }
+            : entry.id === "custom"
+              ? (entry.custom ? `custom:${entry.custom}` : "custom")
+              : entry.id;
+          const finalGuidance = guidancePatch === undefined ? existingGuidance : guidancePatch;
+          // 没有指导覆盖时保持旧形态（字符串 / custom 对象），避免把整张表都改成对象。
+          if (finalGuidance === undefined && typeof base === "string") {
+            sessions[sessionId] = base;
+          } else {
+            const merged = typeof base === "object" ? { ...base } : { strategy: base };
+            if (finalGuidance !== undefined) merged.guidance = finalGuidance;
+            sessions[sessionId] = merged;
+          }
+        }
         store.save({ sessions });
         // 前端不一定传 preset；查不到就当"少一层映射"，不影响会话覆盖生效。
         const preset = payload.agentPreset ?? agentPresetOf(ctx, sessionId);
@@ -1151,10 +1198,22 @@ function doRegister(ctx, ws, store, deps = {}) {
       return;
     }
 
+    // 自测可以点名指导模式：`guidance` 覆盖本次解析结果，便于分别测两种模式。
+    const guidanceOverride = payload.guidance && typeof payload.guidance === "object" && !Array.isArray(payload.guidance)
+      ? {
+          enabled: typeof payload.guidance.enabled === "boolean" ? payload.guidance.enabled : cfg.guidance?.enabled === true,
+          mode: payload.guidance.mode === "builtin" || payload.guidance.mode === "external"
+            ? payload.guidance.mode
+            : cfg.guidance?.mode ?? "external",
+        }
+      : cfg.guidance;
+    const testCfg = { ...cfg, guidance: guidanceOverride, archive: false };
+    // 报文留痕：prompt / 原始输出 / finish / usage，供 Log 窗口比对。
+    const trace = [];
     let result = null;
     try {
       result = await withTimeout(
-        deps.rewrite(input, { provider, model, sessionId: "iot-thinking-self-test" }, { ...cfg, archive: false }, 0, {}),
+        deps.rewrite(input, { provider, model, sessionId: "iot-thinking-self-test" }, testCfg, 0, { trace }),
         SELF_TEST_TIMEOUT_MS,
         "self-test",
       );
@@ -1202,6 +1261,9 @@ function doRegister(ctx, ws, store, deps = {}) {
       minChars,
       maxChars,
       ms: Date.now() - started,
+      // 指导：本次实际用的开关与模式；trace 是完整报文留痕（Log 窗口用）。
+      guidance: guidanceOverride ?? null,
+      trace,
       ...(lastFailure?.message ? { error: String(lastFailure.message) } : {}),
       event: result?.event
         ? {

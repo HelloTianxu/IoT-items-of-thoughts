@@ -214,6 +214,8 @@ window.__ModuleLoader__.load({
       const [testBusy, setTestBusy] = useState(false);
       const [test, setTest] = useState(null);
       const [testStrategy, setTestStrategy] = useState(null);
+      /** 自测的指导模式：空 = 用当前配置；否则强制 builtin/external 便于对比。 */
+      const [testGuidance, setTestGuidance] = useState("");
       const [presetDraft, setPresetDraft] = useState({ preset: "", strategy: "iot-full", style: "" });
       // preset 清单来自宿主（/api/presets）。拿不到时退化成手输 —— headless 组合里
       // 根本没有 agentPresets 服务，那不是错误。
@@ -435,7 +437,10 @@ window.__ModuleLoader__.load({
         setTest(null);
         setErr(null);
         try {
-          const body = testStrategy ? JSON.stringify({ strategy: testStrategy }) : "{}";
+          const payload = {};
+          if (testStrategy) payload.strategy = testStrategy;
+          if (testGuidance) payload.guidance = { enabled: true, mode: testGuidance };
+          const body = JSON.stringify(payload);
           const resp = await fetch(TEST, { method: "POST", headers: { ...GUARD, "content-type": "application/json" }, body });
           const data = await resp.json().catch(() => null);
           if (!resp.ok) throw new Error((data && data.error) || "HTTP " + resp.status);
@@ -563,8 +568,11 @@ window.__ModuleLoader__.load({
       const advisorCfg = (() => {
         const advisor = cfg.advisor && typeof cfg.advisor === "object" && !Array.isArray(cfg.advisor) ? cfg.advisor : {};
         const route = advisor.route && typeof advisor.route === "object" ? advisor.route : {};
+        const guidance = cfg.guidance && typeof cfg.guidance === "object" && !Array.isArray(cfg.guidance) ? cfg.guidance : {};
         return {
-          enabled: advisor.enabled === true,
+          // 开关与模式统一走 guidance；advisor 只保留外部指导的路由与预算。
+          enabled: typeof guidance.enabled === "boolean" ? guidance.enabled : advisor.enabled === true,
+          mode: guidance.mode === "builtin" ? "builtin" : "external",
           provider: typeof route.provider === "string" ? route.provider : null,
           model: typeof route.model === "string" ? route.model : null,
           maxAdvice: Number.isFinite(advisor.maxAdvice) ? advisor.maxAdvice : 3,
@@ -574,8 +582,8 @@ window.__ModuleLoader__.load({
       const setAdvisor = (patch) => {
         const next = { ...advisorCfg, ...patch };
         set({
+          guidance: { enabled: next.enabled, mode: next.mode },
           advisor: {
-            enabled: next.enabled,
             route: { provider: next.provider, model: next.model },
             maxAdvice: next.maxAdvice,
             maxChars: next.maxChars,
@@ -765,19 +773,32 @@ window.__ModuleLoader__.load({
               "启用指导"
             ),
             h("select", {
-              value: advisorCfg.provider ? "explicit" : "follow",
+              value: advisorCfg.mode,
               disabled: !advisorCfg.enabled,
-              style: { ...input, flex: "0 0 220px", padding: "6px 8px" },
-              onChange: (e) => setAdvisor(e.target.value === "follow"
-                ? { provider: null, model: null }
-                : { provider: advisorCfg.provider || providerChoices[0] || null, model: advisorCfg.model || modelChoices[0] || null }),
+              style: { ...input, flex: "0 0 240px", padding: "6px 8px" },
+              onChange: (e) => setAdvisor({ mode: e.target.value === "builtin" ? "builtin" : "external" }),
             },
-              h("option", { value: "follow" }, "跟随压缩器路由"),
-              h("option", { value: "explicit" }, "指定指导模型")
+              h("option", { value: "builtin" }, "内置指导（压缩器自己输出 [指导]）"),
+              h("option", { value: "external" }, "外部指导（并发调用强模型）")
             ),
-            h("span", { style: hint }, advisorCfg.provider
-              ? "指导请求发往：" + routeLabel({ provider: advisorCfg.provider, model: advisorCfg.model })
-              : "指导请求与压缩器同路由（同模型时收益有限）")
+            advisorCfg.mode === "external"
+              ? h("select", {
+                  value: advisorCfg.provider ? "explicit" : "follow",
+                  disabled: !advisorCfg.enabled,
+                  style: { ...input, flex: "0 0 220px", padding: "6px 8px" },
+                  onChange: (e) => setAdvisor(e.target.value === "follow"
+                    ? { provider: null, model: null }
+                    : { provider: advisorCfg.provider || providerChoices[0] || null, model: advisorCfg.model || modelChoices[0] || null }),
+                },
+                  h("option", { value: "follow" }, "跟随压缩器路由"),
+                  h("option", { value: "explicit" }, "指定指导模型")
+                )
+              : null,
+            advisorCfg.mode === "external"
+              ? h("span", { style: hint }, advisorCfg.provider
+                  ? "指导请求发往：" + routeLabel({ provider: advisorCfg.provider, model: advisorCfg.model })
+                  : "指导请求与压缩器同路由（同模型时收益有限）")
+              : h("span", { style: hint }, "内置指导不额外调用模型，成本与普通压缩相同")
           ),
           advisorCfg.enabled
             ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 } },
@@ -987,9 +1008,32 @@ window.__ModuleLoader__.load({
           sessionKeys.length === 0
             ? h("div", { style: { ...hint, marginTop: 8 } }, "当前没有任何会话覆盖。")
             : h("div", { style: { ...mappingTable, marginTop: 8 } },
-                ...sessionKeys.map((sid) => h("div", { key: sid, style: { ...mappingRow, gridTemplateColumns: "minmax(0,1fr) 150px 60px" } },
+                ...sessionKeys.map((sid) => h("div", { key: sid, style: { ...mappingRow, gridTemplateColumns: "minmax(0,1fr) 130px 120px 60px" } },
                   h("span", { style: { ...monoLabel, fontWeight: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, sid),
                   h("span", { style: { ...hint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, choiceLabel(cfg.sessions[sid])),
+                  h("select", {
+                    value: (() => {
+                      const entry = cfg.sessions[sid];
+                      const g = entry && typeof entry === "object" ? entry.guidance : undefined;
+                      if (g === null || g === undefined) return "follow";
+                      if (g.enabled === false) return "off";
+                      return g.mode === "builtin" ? "builtin" : "external";
+                    })(),
+                    style: { ...input, padding: "2px 4px", fontSize: 12 },
+                    onChange: (e) => {
+                      const key = e.target.value;
+                      const guidance = key === "follow" ? null : key === "off" ? { enabled: false } : { enabled: true, mode: key };
+                      const entry = cfg.sessions[sid];
+                      const base = typeof entry === "object" ? { ...entry } : { strategy: entry };
+                      base.guidance = guidance;
+                      set({ sessions: { ...(cfg.sessions ?? {}), [sid]: base } });
+                    },
+                  },
+                    h("option", { value: "follow" }, "指导跟随"),
+                    h("option", { value: "off" }, "指导关闭"),
+                    h("option", { value: "builtin" }, "内置指导"),
+                    h("option", { value: "external" }, "外部指导")
+                  ),
                   h("button", {
                     style: { ...btnSmall, justifySelf: "end" },
                     onClick: () => {
@@ -1376,6 +1420,15 @@ window.__ModuleLoader__.load({
             ...tiers.map((entry) => h("option", { key: entry.value, value: entry.value }, "测试：" + entry.label)),
             ...presetChoices.map((entry) => h("option", { key: entry.value, value: entry.value }, "测试：" + entry.label))
           ),
+          h("select", {
+            value: testGuidance,
+            style: { ...input, width: 150, padding: "6px 8px" },
+            onChange: (e) => setTestGuidance(e.target.value),
+          },
+            h("option", { value: "" }, "按当前指导配置"),
+            h("option", { value: "builtin" }, "测内置指导"),
+            h("option", { value: "external" }, "测外部指导")
+          ),
           h("button", { style: { ...btnOutline, padding: "7px 14px" }, disabled: testBusy || busy, onClick: runTest }, testBusy ? "测试中…" : "一键测试"),
           dirty ? h("span", { style: { ...hint, color: "#b76e00" } }, "尚未保存") : null
         ),
@@ -1408,7 +1461,32 @@ window.__ModuleLoader__.load({
                   + (test.routeSource ? "（来源 " + test.routeSource + "）" : "")
                   + (test.offloaded ? " · 已卸载到该路由" : ""))
             : null,
-          test.text ? h("div", { style: { ...monoBlock, marginTop: 6, maxHeight: 220, overflow: "auto", background: "rgba(127,127,127,0.08)", padding: 8, borderRadius: 6 } }, String(test.text)) : null
+          test.text ? h("div", { style: { ...monoBlock, marginTop: 6, maxHeight: 220, overflow: "auto", background: "rgba(127,127,127,0.08)", padding: 8, borderRadius: 6 } }, String(test.text)) : null,
+          Array.isArray(test.trace) && test.trace.length
+            ? h("div", { style: { marginTop: 10 } },
+                h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 } },
+                  h("div", { style: { fontSize: 12, fontWeight: 600 } }, "报文日志（" + test.trace.length + " 次调用）"),
+                  test.guidance
+                    ? h("span", { style: hint }, "指导：" + (test.guidance.enabled ? (test.guidance.mode === "builtin" ? "内置" : "外部") : "关"))
+                    : null
+                ),
+                ...test.trace.map((entry, index) => h("details", {
+                  key: index,
+                  style: { marginTop: 6, border: "1px solid var(--dsw-alias-border-l2, #e6e9ee)", borderRadius: 6, padding: "6px 8px" },
+                },
+                  h("summary", { style: { cursor: "pointer", fontSize: 12 } },
+                    "#" + (index + 1) + " " + String(entry.stage ?? "") + " · " + String(entry.provider ?? "") + "/" + String(entry.model ?? "")
+                      + (entry.finish ? " · finish=" + entry.finish : "")
+                      + (entry.error ? " · 失败：" + String(entry.error) : "")
+                      + (entry.usage ? " · tokens " + (entry.usage.completionTokens ?? "?") + (entry.usage.reasoningTokens !== null && entry.usage.reasoningTokens !== undefined ? "（思考 " + entry.usage.reasoningTokens + "）" : "") : "")
+                  ),
+                  h("div", { style: { ...hint, marginTop: 6 } }, "提示词（实际发出）："),
+                  h("pre", { style: { ...monoBlock, maxHeight: 260, overflow: "auto", background: "rgba(127,127,127,0.08)", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap", fontSize: 11 } }, String(entry.prompt ?? "")),
+                  h("div", { style: { ...hint, marginTop: 6 } }, "原始输出："),
+                  h("pre", { style: { ...monoBlock, maxHeight: 200, overflow: "auto", background: "rgba(127,127,127,0.08)", padding: 8, borderRadius: 6, whiteSpace: "pre-wrap", fontSize: 11 } }, String(entry.raw ?? "（空）"))
+                ))
+              )
+            : null
         ) : null,
         recent.length ? h("div", { style: section },
           h("div", { style: { ...hint, marginBottom: 6 } }, "最近事件"),
@@ -1477,7 +1555,8 @@ window.__ModuleLoader__.load({
           const resp = await fetch(SESSION, {
             method: "PUT",
             headers: { ...GUARD, "content-type": "application/json" },
-            body: JSON.stringify({ sessionId, strategy, preset }),
+            // guidance: null = 跟随全局；对象 = 本会话覆盖。不传 = 保持原值。
+            body: JSON.stringify({ sessionId, strategy, preset, ...(choice?.guidance === undefined ? {} : { guidance: choice.guidance }) }),
           });
           const data = await resp.json().catch(() => null);
           if (resp.ok && data && alive.current) {
@@ -1496,7 +1575,7 @@ window.__ModuleLoader__.load({
       };
 
       /** 切档：有会话就立刻写；还没有会话就先记下来，等第一条消息落盘。 */
-      const choose = (strategy, preset = null) => {
+      const choose = (strategy, preset = null, guidance) => {
         const raw = strategy || null;
         // 把 `custom:名字` 拆成 `{ strategy: "custom", preset: "custom:名字" }`，
         // 让"档位"与"规格"两件事在落盘时就分开。
@@ -1506,6 +1585,8 @@ window.__ModuleLoader__.load({
           preset: isCustom
             ? (preset || (String(raw).startsWith("custom:") ? String(raw).slice("custom:".length) : null))
             : null,
+          // 指导选择与档位一起记住：新会话第一条消息落盘时不能丢。
+          ...(guidance === undefined ? {} : { guidance }),
         };
         if (!sessionId) {
           setPending(choice);
@@ -1534,6 +1615,18 @@ window.__ModuleLoader__.load({
       const pendingPreset = pending && typeof pending === "object" ? String(pending.preset ?? "") : "";
       const current = override || pendingStrategy || "";
       const currentPreset = overridePreset || pendingPreset || "";
+      // 指导覆盖：null/undefined = 跟随全局；对象 = 本会话覆盖。
+      const overrideGuidance = state?.override && typeof state.override === "object" ? state.override.guidance : undefined;
+      const pendingGuidance = pending && typeof pending === "object" ? pending.guidance : undefined;
+      const guidanceValue = pendingGuidance !== undefined ? pendingGuidance : overrideGuidance;
+      const guidanceKey = guidanceValue === null || guidanceValue === undefined
+        ? "follow"
+        : guidanceValue.enabled === false
+          ? "off"
+          : guidanceValue.mode === "builtin"
+            ? "builtin"
+            : "external";
+      const globalGuidance = state?.guidance?.global ?? { enabled: false, mode: "external" };
       const route = state?.route ? state.route.id : "";
       // 「跟随 preset 默认」显示的是没有本会话覆盖时的结果（presetDefault），
       // 不是 route —— route 已经是"含覆盖的生效档位"。
@@ -1576,6 +1669,28 @@ window.__ModuleLoader__.load({
         },
           h("option", { value: "" }, presetDefault ? "跟随 preset 默认（" + presetDefault + "）" : "跟随 preset 默认"),
           ...tiers.map((entry) => h("option", { key: entry.value, value: entry.value }, entry.label))
+        ),
+        h("span", { style: { opacity: 0.75 } }, "指导"),
+        h("select", {
+          value: guidanceKey,
+          disabled: busy,
+          title: "本会话的指导开关与模式：跟随全局 / 关闭 / 内置（压缩器自己输出 [指导]）/ 外部（并发调用强模型）",
+          style: selectStyle,
+          onChange: (e) => {
+            const key = e.target.value;
+            const guidance = key === "follow"
+              ? null
+              : key === "off"
+                ? { enabled: false }
+                : { enabled: true, mode: key };
+            const base = current || (state?.route?.id ?? "");
+            choose(base, currentPreset || null, guidance);
+          },
+        },
+          h("option", { value: "follow" }, "跟随全局（" + (globalGuidance.enabled ? (globalGuidance.mode === "builtin" ? "内置" : "外部") : "关") + "）"),
+          h("option", { value: "off" }, "关闭"),
+          h("option", { value: "builtin" }, "内置指导"),
+          h("option", { value: "external" }, "外部指导")
         ),
         current && tierOf(current) === "custom"
           ? h("select", {
