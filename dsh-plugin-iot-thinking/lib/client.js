@@ -647,6 +647,7 @@ window.__ModuleLoader__.load({
           maxChars: Number.isFinite(advisor.maxChars) ? advisor.maxChars : 600,
           effort: typeof advisor.effort === "string" ? advisor.effort : "auto",
           temperature: advisor.temperature === null ? null : Number.isFinite(advisor.temperature) ? advisor.temperature : 0.3,
+          wait: advisor.wait !== false,
         };
       })();
       const setAdvisor = (patch) => {
@@ -657,6 +658,7 @@ window.__ModuleLoader__.load({
             route: { provider: next.provider, model: next.model },
             effort: next.effort,
             temperature: next.temperature,
+            wait: next.wait,
             maxAdvice: next.maxAdvice,
             maxChars: next.maxChars,
           },
@@ -840,7 +842,7 @@ window.__ModuleLoader__.load({
         // ── 指导层（外部评审） ──────────────────────────────────────────────
         h("div", { style: section },
           h("div", { style: sectionHead },
-            h("div", { style: sectionTitle }, "指导层（外部评审）"),
+            h("div", { style: sectionTitle }, "建议层（旁观者评审）"),
             h("span", { style: hint }, advisorCfg.enabled ? "已启用" : "默认关闭")
           ),
           h("div", { style: hint },
@@ -852,7 +854,7 @@ window.__ModuleLoader__.load({
                 checked: advisorCfg.enabled,
                 onChange: (e) => setAdvisor({ enabled: e.target.checked }),
               }),
-              "启用指导"
+              "启用旁观者建议"
             ),
             h("select", {
               value: advisorCfg.mode,
@@ -860,8 +862,8 @@ window.__ModuleLoader__.load({
               style: { ...input, flex: "0 0 240px", padding: "6px 8px" },
               onChange: (e) => setAdvisor({ mode: e.target.value === "builtin" ? "builtin" : "external" }),
             },
-              h("option", { value: "builtin" }, "内置指导（压缩器自己输出 [指导]）"),
-              h("option", { value: "external" }, "外部指导（并发调用强模型）")
+              h("option", { value: "builtin" }, "内置建议（压缩器自己输出 [旁观者建议]）"),
+              h("option", { value: "external" }, "外部建议（并发调用强模型）")
             ),
             advisorCfg.mode === "external"
               ? h("select", {
@@ -905,12 +907,12 @@ window.__ModuleLoader__.load({
               : null,
             advisorCfg.mode === "external"
               ? h("span", { style: hint }, advisorCfg.provider && advisorCfg.model
-                  ? "指导请求发往：" + routeLabel({ provider: advisorCfg.provider, model: advisorCfg.model })
+                  ? "建议请求发往：" + routeLabel({ provider: advisorCfg.provider, model: advisorCfg.model })
                     + (advisorReasoning && Array.isArray(advisorReasoning.efforts) && advisorReasoning.efforts.length
                       ? "（该模型公开档位：" + advisorReasoning.efforts.map((entry) => entry.id).join("/") + "）"
                       : "（未拿到该模型的档位目录，auto 会按实际拒绝情况降级）")
-                  : "指导请求与压缩器同路由（同模型时收益有限）")
-              : h("span", { style: hint }, "内置指导不额外调用模型，成本与普通压缩相同")
+                  : "建议请求与压缩器同路由（同模型时收益有限）")
+              : h("span", { style: hint }, "内置建议不额外调用模型，成本与普通压缩相同")
           ),
           advisorCfg.enabled
             ? h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 } },
@@ -927,7 +929,7 @@ window.__ModuleLoader__.load({
                   h("span", { style: { ...hint, fontSize: 11 } }, "宁少勿多：泛泛而谈的建议不如不给。")
                 ),
                 h("label", { style: limitCell },
-                  h("span", { style: fieldName }, "指导 temperature"),
+                  h("span", { style: fieldName }, "建议 temperature"),
                   h("input", {
                     type: "number",
                     min: 0,
@@ -939,6 +941,20 @@ window.__ModuleLoader__.load({
                     onChange: (e) => setAdvisor({ temperature: e.target.value === "" ? null : Number(e.target.value) }),
                   }),
                   h("span", { style: { ...hint, fontSize: 11 } }, "有的模型只接受默认 temperature（如 GPT-6 Astra 只认 1）；留空就不发该字段。")
+                ),
+                h("label", { style: { ...limitCell, gridColumn: "1 / -1" } },
+                  h("span", { style: { display: "flex", alignItems: "center", gap: 6, cursor: "pointer" } },
+                    h("input", {
+                      type: "checkbox",
+                      checked: advisorCfg.wait !== false,
+                      onChange: (e) => setAdvisor({ wait: e.target.checked }),
+                    }),
+                    h("span", { style: fieldName }, "等待建议返回")
+                  ),
+                  h("span", { style: { ...hint, fontSize: 11 } },
+                    advisorCfg.wait !== false
+                      ? "压缩会等建议一起返回再继续。建议质量更好，但慢模型会拖住这一块。"
+                      : "可选建议：压缩一完成就继续推理，建议没赶上就跳过（记 advisor-skipped:not-ready）。慢模型不拖流程。")
                 ),
                 h("label", { style: limitCell },
                   h("span", { style: fieldName }, "建议总字数上限"),
@@ -1155,10 +1171,10 @@ window.__ModuleLoader__.load({
                       set({ sessions: { ...(cfg.sessions ?? {}), [sid]: base } });
                     },
                   },
-                    h("option", { value: "follow" }, "指导跟随"),
-                    h("option", { value: "off" }, "指导关闭"),
-                    h("option", { value: "builtin" }, "内置指导"),
-                    h("option", { value: "external" }, "外部指导")
+                    h("option", { value: "follow" }, "建议跟随"),
+                    h("option", { value: "off" }, "建议关闭"),
+                    h("option", { value: "builtin" }, "内置建议"),
+                    h("option", { value: "external" }, "外部建议")
                   ),
                   h("button", {
                     style: { ...btnSmall, justifySelf: "end" },
@@ -1552,8 +1568,8 @@ window.__ModuleLoader__.load({
             onChange: (e) => setTestGuidance(e.target.value),
           },
             h("option", { value: "" }, "按当前指导配置"),
-            h("option", { value: "builtin" }, "测内置指导"),
-            h("option", { value: "external" }, "测外部指导")
+            h("option", { value: "builtin" }, "测内置建议"),
+            h("option", { value: "external" }, "测外部建议")
           ),
           h("button", { style: { ...btnOutline, padding: "7px 14px" }, disabled: testBusy || busy, onClick: runTest }, testBusy ? "测试中…" : "一键测试"),
           dirty ? h("span", { style: { ...hint, color: "#b76e00" } }, "尚未保存") : null
@@ -1589,11 +1605,11 @@ window.__ModuleLoader__.load({
             : null,
           test.guidance
             ? h("div", { style: { ...hint, marginTop: 4 } },
-                "本次指导：" + (test.guidance.enabled ? (test.guidance.mode === "builtin" ? "内置（压缩器输出 [指导]）" : "外部（并发调用强模型）") : "关闭"))
+                "本次建议：" + (test.guidance.enabled ? (test.guidance.mode === "builtin" ? "内置（压缩器输出 [旁观者建议]）" : "外部（并发调用强模型）") : "关闭"))
             : null,
           test.advice
             ? h("div", { style: { marginTop: 8 } },
-                h("div", { style: { fontSize: 12, fontWeight: 600, color: "#2f6fed" } }, "外部指导输出："),
+                h("div", { style: { fontSize: 12, fontWeight: 600, color: "#2f6fed" } }, "旁观者建议输出："),
                 h("div", { style: { ...monoBlock, marginTop: 4, maxHeight: 220, overflow: "auto", background: "rgba(47,111,237,0.08)", padding: 8, borderRadius: 6 } }, String(test.advice))
               )
             : null,
@@ -1810,7 +1826,7 @@ window.__ModuleLoader__.load({
         h("select", {
           value: guidanceKey,
           disabled: busy,
-          title: "本会话的指导开关与模式：跟随全局 / 关闭 / 内置（压缩器自己输出 [指导]）/ 外部（并发调用强模型）",
+          title: "本会话的建议开关与模式：跟随全局 / 关闭 / 内置（压缩器自己输出 [旁观者建议]）/ 外部（并发调用强模型）",
           style: selectStyle,
           onChange: (e) => {
             const key = e.target.value;
@@ -1825,8 +1841,8 @@ window.__ModuleLoader__.load({
         },
           h("option", { value: "follow" }, "跟随全局（" + (globalGuidance.enabled ? (globalGuidance.mode === "builtin" ? "内置" : "外部") : "关") + "）"),
           h("option", { value: "off" }, "关闭"),
-          h("option", { value: "builtin" }, "内置指导"),
-          h("option", { value: "external" }, "外部指导")
+          h("option", { value: "builtin" }, "内置建议"),
+          h("option", { value: "external" }, "外部建议")
         ),
         current && tierOf(current) === "custom"
           ? h("select", {

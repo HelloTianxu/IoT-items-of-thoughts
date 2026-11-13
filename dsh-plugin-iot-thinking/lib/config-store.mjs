@@ -64,6 +64,11 @@ export const DEFAULTS = Object.freeze({
     effort: "auto",
     /** 指导模型的 temperature；null = 不发该字段（有的模型只接受默认值）。 */
     temperature: 0.3,
+    /**
+     * 是否等待建议返回。false = 可选建议：压缩一完成就继续，建议没赶上就跳过。
+     * 慢的指导模型不该拖住整个任务流程。
+     */
+    wait: true,
     timeoutMs: 30000,
     maxAdvice: 3,
     maxChars: 600,
@@ -193,6 +198,7 @@ function advisorConfig(value) {
     route: { provider, model },
     effort: effort ?? "auto",
     temperature: raw.temperature === null ? null : Number.isFinite(raw.temperature) ? raw.temperature : 0.3,
+    wait: raw.wait !== false,
     timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
     maxAdvice: clampInt(raw.maxAdvice, 1, 3, 3),
     maxChars: clampInt(raw.maxChars, 80, 600, 600),

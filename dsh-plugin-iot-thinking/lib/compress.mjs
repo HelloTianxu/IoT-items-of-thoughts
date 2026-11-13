@@ -427,14 +427,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   });
 
   /**
-   * 指导层：压缩成功后，让另一个模型看一遍骨架并追加建议。
-   *
-   * 三条硬约束：① 只在压缩成功时调用（压缩失败时没有骨架可看）；
-   * ② 独立超时，失败一律返回原文（增强不能把主流程拖挂）；
-   * ③ 指导不参与节点预算，追加在末尾。
-   */
-  /**
-   * 模式二：外部指导，与压缩**并发**两路。
+   * 模式二：外部建议，与压缩**并发**两路。
    *
    * 指导模型拿的是**原始 thinking 草稿**（不是压缩骨架），压缩模型拿同一份草稿；
    * 两路结果合并成最终的 think 内容。并发是为了不让指导的延迟叠加到压缩上；
@@ -444,10 +437,13 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   // （测试、自测路由）可能没有 guidance 字段：按档位推断 —— 指导档等于内置指导，
   // 其余档默认关闭，与旧行为一致。
   const guidance = cfg.guidance
-    ?? (Array.isArray(strategy.labels) && strategy.labels.includes("指导")
+    ?? (Array.isArray(strategy.labels) && strategy.labels.some((label) => label === "旁观者建议" || label === "指导")
       ? { enabled: true, mode: "builtin" }
       : { enabled: false, mode: "external" });
   const guidanceOn = guidance.enabled === true;
+
+  /** 指导请求的落地状态：`wait` 为 false 时，压缩一完成就只看它有没有恰好就绪。 */
+  const adviceState = { settled: false, result: null };
 
   const startAdvice = () => {
     if (!guidanceOn) return null;
@@ -506,12 +502,33 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         advice,
         event: { provider: advisorRoute.provider, model: advisorRoute.model, offloaded: advisorRoute.offloaded, lines: advice.split("\n\n").length },
       };
+    }).then((result) => {
+      adviceState.settled = true;
+      adviceState.result = result;
+      return result;
+    }, (error) => {
+      // 指导链任何意外都不能变成未处理的 rejection：它只是增强。
+      adviceState.settled = true;
+      adviceState.result = null;
+      mark("advisor-failed", { index, strategy: strategy.id, message: String(error?.message ?? error) });
+      return null;
     });
   };
 
-  /** 压缩成功后才收指导结果：压缩失败时指导结果直接丢弃。 */
+  /**
+   * 压缩成功后才收指导结果：压缩失败时指导结果直接丢弃。
+   *
+   * `advisor.wait === false` 时**不等待**：压缩一完成就检查指导是否已经就绪；
+   * 没就绪就跳过，继续往下走。慢的指导模型不该拖住整个任务流程 ——
+   * 这一块少一条建议，比多等十几秒划算。
+   */
   const collectAdvice = async (nodes, pending) => {
     if (!pending) return { text: nodes, advice: null, event: null };
+    const wait = cfg.advisor?.wait !== false;
+    if (!wait && !adviceState.settled) {
+      mark("advisor-skipped", { index, strategy: strategy.id, reason: "not-ready" });
+      return { text: nodes, advice: null, event: null };
+    }
     const result = await pending;
     if (!result) return { text: nodes, advice: null, event: null };
     return { text: nodes, advice: result.advice, event: result.event };
@@ -536,7 +553,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       state,
       // 三档基础模式没有"预设正文"，用贴入的文本充当用户补充层。
       extraPrompt: cfg.customText ?? "",
-      // 内置指导模式：让压缩器自己在输出里加 [指导]。
+      // 内置建议模式：让压缩器自己在输出里加 [旁观者建议]。
       allowAdvice: guidanceOn && guidance.mode === "builtin",
     });
     if (!instruction) {

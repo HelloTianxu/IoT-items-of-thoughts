@@ -1799,15 +1799,15 @@ await check("内置预设可编辑：覆盖文本优先，恢复默认后回到�
 await check("模式一（指导档）：一次调用同时产出压缩节点与 [指导]，且 [指导] 不占节点预算", () => {
   const strategy = strategyById("iot-guided");
   assert.ok(strategy, "指导档必须存在");
-  assert.ok(strategy.labels.includes("指导"), "指导档的合法标签包含 [指导]");
+  assert.ok(strategy.labels.includes("旁观者建议"), "指导档的合法标签包含 [旁观者建议]");
   const prompt = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 } });
-  assert.ok(prompt.includes("[指导]"), "提示词必须说明 [指导] 的写法");
+  assert.ok(prompt.includes("[旁观者建议]"), "提示词必须说明 [指导] 的写法");
   assert.ok(prompt.includes("建议型"), "指导是建议而不是命令");
 
   const raw = "[决定] 先把替换闸门的判定顺序写成测试。\n\n[计划] 再改设置卡里的档位选择。\n\n[指导] 建议先补一个替换闸门的测试。";
   const verdict = strategy.finalize(raw, { original: "很长的草稿".repeat(50), limits: { maxNodes: 2, maxNeutral: 2 } });
   assert.equal(verdict.ok, true);
-  assert.ok(verdict.text.includes("[指导]"), "指导节点必须保留");
+  assert.ok(verdict.text.includes("[旁观者建议]"), "指导节点必须保留");
   // maxNodes=2 只约束压缩节点；[指导] 不参与截断。
   assert.equal(verdict.text.split("\n\n").length, 3);
 });
@@ -1835,7 +1835,7 @@ await check("指导层：关闭时不调用，开启时调用强模型并给出�
         calls.push({ provider: options.provider, model: options.model });
         // 压缩调用走弱模型，指导调用走强模型。
         const text = options.model === "strong"
-          ? "[指导] 下一步先把替换闸门的判定顺序写成测试，再动 UI。\n\n[指导] 别在块结束路径上做同步等待。"
+          ? "[旁观者建议] 下一步先把替换闸门的判定顺序写成测试，再动 UI。\n\n[指导] 别在块结束路径上做同步等待。"
           : "[决定] 先做替换闸门。\n\n[计划] 补测试。";
         return chunks([{ type: "text-delta", index: 0, text }, { type: "finish", reason: { kind: "stop" } }]);
       },
@@ -1851,7 +1851,7 @@ await check("指导层：关闭时不调用，开启时调用强模型并给出�
   const result = await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak", sessionId: "s" } });
   assert.ok(result, "压缩结果要保留");
   assert.equal(result.text, "[决定] 先做替换闸门。\n\n[计划] 补测试。", "主体不含指导");
-  assert.ok(result.advice.includes("[指导]"), "指导单独返回");
+  assert.ok(result.advice.includes("[旁观者建议]"), "指导单独返回");
   assert.equal(calls.length, 2, "压缩一次 + 指导一次");
   assert.ok(calls.some((call) => call.model === "strong"), "指导走配置的强模型");
 });
@@ -1868,6 +1868,65 @@ await check("指导层：关闭时不多打一次模型", async () => {
   };
   await compressWith(ctx, { cfg, text: DRAFT.repeat(2), options: { provider: "weak", model: "weak" } });
   assert.equal(calls.length, 1);
+});
+
+await check("可选建议：wait=false 时压缩不等指导，慢模型不拖流程", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        if (options.model !== "strong") {
+          return chunks([{ type: "text-delta", index: 0, text: "[决定] 先做替换闸门。\n\n[计划] 再补测试。" }, { type: "finish", reason: { kind: "stop" } }]);
+        }
+        // 指导模型很慢：压缩早就完成了。
+        return (async function* () {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          yield { type: "text-delta", index: 0, text: "[旁观者建议] 先补测试。" };
+          yield { type: "finish", reason: { kind: "stop" } };
+        })();
+      },
+    },
+  };
+  const cfg = {
+    strategy: "iot-full",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { route: { provider: "strong", model: "strong" }, wait: false, maxAdvice: 3, maxChars: 600 },
+    guidance: { enabled: true, mode: "external" },
+  };
+  const started = Date.now();
+  const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
+  const elapsed = Date.now() - started;
+  assert.ok(result && result.text.includes("[决定]"), "压缩结果照常返回");
+  assert.ok(!result.advice, "没赶上的建议要丢弃");
+  assert.ok(elapsed < 120, "不能等慢指导（实际 " + elapsed + "ms）");
+  assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "not-ready"), "要记账 not-ready");
+});
+
+await check("可选建议：wait=true 时仍然等待并合并", async () => {
+  const events = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        if (options.model !== "strong") {
+          return chunks([{ type: "text-delta", index: 0, text: "[决定] 先做替换闸门。" }, { type: "finish", reason: { kind: "stop" } }]);
+        }
+        return (async function* () {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          yield { type: "text-delta", index: 0, text: "[旁观者建议] 先补测试。" };
+          yield { type: "finish", reason: { kind: "stop" } };
+        })();
+      },
+    },
+  };
+  const cfg = {
+    strategy: "iot-full",
+    rewrite: { provider: "weak", model: "weak" },
+    advisor: { route: { provider: "strong", model: "strong" }, wait: true, maxAdvice: 3, maxChars: 600 },
+    guidance: { enabled: true, mode: "external" },
+  };
+  const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
+  assert.ok(result.advice && result.advice.includes("[旁观者建议]"), "要等并合并");
+  assert.ok(!events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "not-ready"));
 });
 
 await check("指导层：调用失败不影响压缩结果", async () => {
@@ -1933,7 +1992,7 @@ await check("指导档位：显式档位原样发出；auto 被拒时降级并�
         if (options.reasoningEffort !== undefined && options.reasoningEffort !== null) {
           return chunks([{ type: "finish", reason: { kind: "error", failure: { message: "does not support reasoning effort", code: "INVALID_REQUEST" } } }]);
         }
-        return chunks([{ type: "text-delta", index: 0, text: "[指导] 先补测试。" }, { type: "finish", reason: { kind: "stop" } }]);
+        return chunks([{ type: "text-delta", index: 0, text: "[旁观者建议] 先补测试。" }, { type: "finish", reason: { kind: "stop" } }]);
       },
     },
   };
@@ -1947,7 +2006,7 @@ await check("指导档位：显式档位原样发出；auto 被拒时降级并�
     effort: "auto",
     onEvent: (event, fields) => events.push({ event, ...fields }),
   });
-  assert.equal(raw, "[指导] 先补测试。", "降级后拿到正文");
+  assert.equal(raw, "[旁观者建议] 先补测试。", "降级后拿到正文");
   assert.equal(calls.length, 2, "auto 先试 off，被拒后再发一次");
   assert.equal(calls[0], "off");
   assert.ok(events.some((entry) => entry.event === "advisor-effort-fallback"));
@@ -1986,7 +2045,7 @@ await check("指导调用只取正文：思考模型的 reasoning 块不混进�
     llm: {
       stream: () => chunks([
         { type: "reasoning-delta", index: 0, text: "我先想想他到底要什么……" },
-        { type: "text-delta", index: 0, text: "[指导] 先补替换闸门的测试。" },
+        { type: "text-delta", index: 0, text: "[旁观者建议] 先补替换闸门的测试。" },
         { type: "finish", reason: { kind: "stop" } },
         { type: "usage", usage: { completion_tokens: 300, completion_tokens_details: { reasoning_tokens: 240 } } },
       ]),
@@ -2001,7 +2060,7 @@ await check("指导调用只取正文：思考模型的 reasoning 块不混进�
     timeoutMs: 5000,
     onEvent: (event, fields) => events.push({ event, ...fields }),
   });
-  assert.equal(raw, "[指导] 先补替换闸门的测试。", "只取正文块");
+  assert.equal(raw, "[旁观者建议] 先补替换闸门的测试。", "只取正文块");
   assert.ok(!raw.includes("我先想想"), "内心独白不能混进来");
   const usageEvent = events.find((entry) => entry.event === "advisor-usage");
   assert.equal(usageEvent.reasoningTokens, 240);
@@ -2023,11 +2082,29 @@ await check("指导调用正文为空：区分截断与只想不说，都返回 
   assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "truncated-no-text"));
 });
 
+await check("标签改名兼容：旧的 [指导] / 【指导】/ 指导： 都归一成 [旁观者建议]", () => {
+  const out = formatAdvice("[指导] 先补测试。\n【指导】把同步等待改成异步。\n指导：先看账本。", { maxAdvice: 3, maxChars: 600 });
+  const lines = out.split("\n\n");
+  assert.equal(lines.length, 3);
+  for (const line of lines) assert.ok(line.startsWith("[旁观者建议]"), "旧标签必须被改名");
+  assert.ok(!out.includes("[指导]"), "输出里不应残留旧标签");
+
+  // guided 档：模型仍按旧标签输出时也要保留并改名。
+  const strategy = strategyById("iot-guided");
+  const verdict = strategy.finalize("[决定] 先把替换闸门的判定顺序写成测试。\n\n[指导] 建议先补一个替换闸门的测试。", {
+    original: "很长的草稿".repeat(50),
+    limits: { maxNodes: 2, maxNeutral: 2 },
+  });
+  assert.equal(verdict.ok, true);
+  assert.ok(verdict.text.includes("[旁观者建议]"), "旧标签要升级成新标签");
+  assert.ok(!verdict.text.includes("[指导]"));
+});
+
 await check("指导格式：只保留带标签的可执行建议，去重并限条数", () => {
   const raw = "可以考虑一下。\n指导：先补测试。\n[指导] 先补测试。\n【指导】把同步等待改成异步。\n[指导] 太短";
   const out = formatAdvice(raw, { maxAdvice: 2, maxChars: 600 });
-  assert.ok(out.startsWith("[指导] 先补测试。"));
-  assert.ok(out.includes("[指导] 把同步等待改成异步。"));
+  assert.ok(out.startsWith("[旁观者建议] 先补测试。"));
+  assert.ok(out.includes("[旁观者建议] 把同步等待改成异步。"));
   assert.equal(out.split("\n\n").length, 2, "重复项被去掉，且不超过 2 条");
   assert.ok(!out.includes("可以考虑一下"), "没有标签的行不算建议");
   assert.equal(appendAdvice("主体", out), `主体\n\n${out}`);
@@ -2051,7 +2128,7 @@ await check("指导开关走 guidance：advisor.enabled 没设也要能调用外
     llm: {
       stream: (options) => {
         calls.push({ model: options.model });
-        const text = options.model === "strong" ? "[指导] 先补测试。" : "[决定] 先做替换闸门。";
+        const text = options.model === "strong" ? "[旁观者建议] 先补测试。" : "[决定] 先做替换闸门。";
         return chunks([{ type: "text-delta", index: 0, text }, { type: "finish", reason: { kind: "stop" } }]);
       },
     },
@@ -2065,7 +2142,7 @@ await check("指导开关走 guidance：advisor.enabled 没设也要能调用外
   };
   const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
   assert.ok(result, "压缩结果要保留");
-  assert.ok(result.advice && result.advice.includes("[指导]"), "外部指导要产出建议");
+  assert.ok(result.advice && result.advice.includes("[旁观者建议]"), "外部指导要产出建议");
   assert.ok(calls.some((call) => call.model === "strong"), "必须真的调用强模型");
   assert.ok(events.some((entry) => entry.event === "advisor-called"), "要记账 advisor-called");
 });
@@ -2851,7 +2928,7 @@ await check("自测路由：外部指导的输出要回传并合并进展示文�
     rewrite: async () => ({
       text: "[决定] 甲。",
       event: { strategy: "iot-full", finish: "stop" },
-      advice: "[指导] 先补替换闸门的测试。",
+      advice: "[旁观者建议] 先补替换闸门的测试。",
     }),
     getRoute: () => ({ provider: "p", model: "m" }),
   });
@@ -2861,8 +2938,8 @@ await check("自测路由：外部指导的输出要回传并合并进展示文�
     body: JSON.stringify({ strategy: "iot-full", text: DRAFT.repeat(3) }),
   });
   assert.equal(res.statusCode, 200);
-  assert.equal(res.payload.advice, "[指导] 先补替换闸门的测试。", "指导要单独回传");
-  assert.ok(res.payload.text.includes("[指导]"), "展示文本要包含指导");
+  assert.equal(res.payload.advice, "[旁观者建议] 先补替换闸门的测试。", "指导要单独回传");
+  assert.ok(res.payload.text.includes("[旁观者建议]"), "展示文本要包含指导");
   assert.equal(res.payload.charsOutBody, "[决定] 甲。".length, "主体字数单独给出");
 });
 

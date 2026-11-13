@@ -24,8 +24,17 @@ import {
   rememberEffortPlan,
 } from "./effort.mjs";
 
-/** 指导输出的标签：独立于压缩节点，不参与节点预算与优先级排序。 */
-export const ADVISOR_LABEL = "[指导]";
+/**
+ * 建议输出的标签：独立于压缩节点，不参与节点预算与优先级排序。
+ *
+ * 为什么叫"旁观者建议"而不是"指导"：「指导」听起来像权威指令，主模型容易照办；
+ * 而外部模型其实只看到这一轮草稿，它是旁观者，不是老师。标签本身就说明了
+ * 这条建议的**证据边界** —— 建议型、可忽略、不构成命令。
+ */
+export const ADVISOR_LABEL = "[旁观者建议]";
+
+/** 旧标签：升级前写进配置或模型输出里的 `[指导]`，读的时候仍认。 */
+export const ADVISOR_LABEL_LEGACY = "[指导]";
 
 /** 指导条数与长度的默认上限：宁少勿多，泛泛而谈的建议不如不给。 */
 export const ADVISOR_LIMITS = Object.freeze({
@@ -108,8 +117,8 @@ export function formatAdvice(raw, limits = {}) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    // 模型有时会把标签写成 `指导：` 或 `【指导】`，统一成方括号。
-    .map((line) => line.replace(/^[\[【]?(?:指导|建议|advisor)[\]】]?\s*[:：]?\s*/iu, `${ADVISOR_LABEL} `))
+    // 模型有时会把标签写成 `指导：` / `【指导】` / `旁观建议`，统一成方括号。
+    .map((line) => line.replace(/^[\[【]?(?:旁观者建议|旁观建议|指导|建议|observer|advisor)[\]】]?\s*[:：]?\s*/iu, `${ADVISOR_LABEL} `))
     .filter((line) => line.startsWith(ADVISOR_LABEL) && line.slice(ADVISOR_LABEL.length).trim().length >= ADVISOR_LIMITS.minChars);
 
   const seen = new Set();
