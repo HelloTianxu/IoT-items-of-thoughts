@@ -42,5 +42,10 @@
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node selftest.mjs && node smoke.mjs",
+    "test:teacher": "node --experimental-vm-modules teacher-entry-test.mjs",
+    "smoke": "node smoke.mjs"
+  }
 }

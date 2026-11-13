@@ -6,6 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+
+// SourceTextModule 需要 --experimental-vm-modules：缺标志时给出可执行的提示，
+// 而不是抛一个看不懂的 "not a constructor"。
+if (typeof vm.SourceTextModule !== "function") {
+  console.error("teacher-entry-test 需要 --experimental-vm-modules；请用 `pnpm run test:teacher` 或 `node --experimental-vm-modules teacher-entry-test.mjs`。");
+  process.exit(2);
+}
 import { ConfigStore } from "./lib/config-store.mjs";
 import { resetTeacherState, teacherStatus, consultTeacher, markConsulted } from "./lib/teacher.mjs";
 
