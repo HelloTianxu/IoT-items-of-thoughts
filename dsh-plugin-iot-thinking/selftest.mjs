@@ -1389,7 +1389,7 @@ const ROUTE_CFG = {
 
 await check("策略目录：八个策略（含指导档与第 4 项自定义），id 唯一，默认策略在其中", () => {
   const ids = strategyIds();
-  assert.deepEqual(ids, ["iot-compact", "iot-balanced", "iot-full", "iot-guided", "custom", "off"]);
+  assert.deepEqual(ids, ["iot-compact", "iot-balanced", "iot-full", "custom", "off"]);
   assert.equal(new Set(ids).size, ids.length);
   assert.ok(ids.includes(DEFAULT_STRATEGY));
   const catalog = strategyCatalog();
@@ -1909,12 +1909,19 @@ await check("旧配置迁移：只有 advisor.enabled 的旧文件，升级后�
   assert.equal(store.load().guidance.enabled, true, "保存后仍要开着");
 });
 
-await check("档位推断：iot-guided 没写 guidance 时等价内置建议", () => {
+await check("旧档位别名：iot-guided 折叠成 iot-full + 内置建议，显式配置优先", () => {
   const guided = resolveConfig({ strategy: "iot-guided" }, { sessionId: "s" });
-  assert.deepEqual(guided.guidance, { enabled: true, mode: "builtin" });
-  // 显式关掉时以用户为准，档位推断不能覆盖它。
+  assert.equal(guided.strategy, "iot-full", "旧档位折叠成完整档");
+  assert.deepEqual(guided.guidance, { enabled: true, mode: "builtin" }, "隐含的内置建议要带上来");
+  // 显式关掉时以用户为准，别名不能覆盖它。
   const off = resolveConfig({ strategy: "iot-guided", guidance: { enabled: false, mode: "external" } }, { sessionId: "s" });
   assert.equal(off.guidance.enabled, false, "显式关闭要生效");
+  // 会话覆盖里写了旧档位：同样折叠，且只影响该会话。
+  const session = resolveConfig({ strategy: "iot-full", sessions: { s: "iot-guided" } }, { sessionId: "s" });
+  assert.equal(session.strategy, "iot-full");
+  assert.deepEqual(session.guidance, { enabled: true, mode: "builtin" });
+  const other = resolveConfig({ strategy: "iot-full", sessions: { s: "iot-guided" } }, { sessionId: "s2" });
+  assert.equal(other.guidance.enabled, false, "别的会话不受影响");
 });
 
 await check("/iot 切换档位保留会话建议覆盖，/iot auto 也不清建议", () => {
@@ -2406,30 +2413,38 @@ await check("内置预设可编辑：覆盖文本优先，恢复默认后回到�
   assert.equal(prepared.state.edited, true);
 });
 
-await check("模式一（指导档）：一次调用同时产出压缩节点与 [指导]，且 [指导] 不占节点预算", () => {
-  const strategy = strategyById("iot-guided");
-  assert.ok(strategy, "指导档必须存在");
-  assert.ok(strategy.labels.includes("旁观者建议"), "指导档的合法标签包含 [旁观者建议]");
-  const prompt = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 } });
-  assert.ok(prompt.includes("[旁观者建议]"), "提示词必须说明 [指导] 的写法");
-  assert.ok(prompt.includes("建议型"), "指导是建议而不是命令");
+await check("内置建议：压缩档 + 内置建议 = 同一次调用产出压缩节点与建议，建议不占预算", () => {
+  const strategy = strategyById("iot-full");
+  assert.ok(strategy, "完整档必须存在");
+  const prompt = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 }, allowAdvice: true });
+  assert.ok(prompt.includes("[旁观者建议]"), "开启内置建议后提示词必须说明写法");
+  assert.ok(prompt.includes("建议要求（本次开启）"), "开启后要有建议要求");
+  assert.ok(prompt.includes("不是命令"), "建议不是命令");
+  // 没开内置建议时提示词里不该出现建议要求。
+  const plain = strategy.buildPrompt("草稿", { strict: false, limits: { maxTokens: 3000 } });
+  assert.ok(!plain.includes("建议要求（本次开启）"), "关闭时不该要求输出建议");
 
   const raw = "[决定] 先把替换闸门的判定顺序写成测试。\n\n[计划] 再改设置卡里的档位选择。\n\n[指导] 建议先补一个替换闸门的测试。";
-  const verdict = strategy.finalize(raw, { original: "很长的草稿".repeat(50), limits: { maxNodes: 2, maxNeutral: 2 } });
+  const verdict = strategy.finalize(raw, {
+    original: Array.from({ length: 40 }, (_, i) => "第" + i + "句草稿，内容各不相同。").join(""),
+    limits: { maxNodes: 2, maxNeutral: 2 },
+    allowAdvice: true,
+  });
   assert.equal(verdict.ok, true);
-  assert.ok(verdict.text.includes("[旁观者建议]"), "指导节点必须保留");
-  // maxNodes=2 只约束压缩节点；[指导] 不参与截断。
+  assert.ok(verdict.text.includes("[旁观者建议]"), "建议节点必须保留");
+  // maxNodes=2 只约束压缩节点；建议不参与截断。
   assert.equal(verdict.text.split("\n\n").length, 3);
 });
 
-await check("模式一与模式二互斥：指导档下不再发外部指导", async () => {
+await check("内置建议与外部建议互斥：内置模式下不再打强模型", async () => {
   const calls = [];
   const events = [];
   const ctx = { llm: { stream: (options) => { calls.push(options.model); return chunks([{ type: "text-delta", index: 0, text: "[决定] 先把替换闸门的判定顺序写成测试。\n\n[指导] 建议先补一个替换闸门的测试。" }, { type: "finish", reason: { kind: "stop" } }]); } } };
   const cfg = {
-    strategy: "iot-guided",
+    strategy: "iot-full",
     rewrite: { provider: "weak", model: "weak" },
     advisor: { enabled: true, route: { provider: "strong", model: "strong" } },
+    guidance: { enabled: true, mode: "builtin" },
   };
   const result = await compressWith(ctx, { cfg, events, text: DRAFT.repeat(2) });
   assert.equal(calls.length, 1, "指导档只调用压缩器，不再打强模型");
@@ -2745,11 +2760,12 @@ await check("标签改名兼容：旧的 [指导] / 【指导】/ 指导： 都�
   for (const line of lines) assert.ok(line.startsWith("[旁观者建议]"), "旧标签必须被改名");
   assert.ok(!out.includes("[指导]"), "输出里不应残留旧标签");
 
-  // guided 档：模型仍按旧标签输出时也要保留并改名。
-  const strategy = strategyById("iot-guided");
+  // 内置建议模式：模型仍按旧标签输出时也要保留并改名。
+  const strategy = strategyById("iot-full");
   const verdict = strategy.finalize("[决定] 先把替换闸门的判定顺序写成测试。\n\n[指导] 建议先补一个替换闸门的测试。", {
-    original: "很长的草稿".repeat(50),
+    original: Array.from({ length: 40 }, (_, i) => "第" + i + "句草稿，内容各不相同。").join(""),
     limits: { maxNodes: 2, maxNeutral: 2 },
+    allowAdvice: true,
   });
   assert.equal(verdict.ok, true);
   assert.ok(verdict.text.includes("[旁观者建议]"), "旧标签要升级成新标签");
@@ -3434,7 +3450,7 @@ await check("session API：GET 说明解析来源，PUT 写覆盖并可清回跟
   assert.equal(read.payload.route.source, "preset");
   assert.equal(read.payload.override, null);
   // 两级值域：第一级是档位（三档 + custom + off），第二级是具体预设
-  assert.deepEqual(read.payload.choices.tiers.map((entry) => entry.value), ["iot-compact", "iot-balanced", "iot-full", "iot-guided", "custom", "off"]);
+  assert.deepEqual(read.payload.choices.tiers.map((entry) => entry.value), ["iot-compact", "iot-balanced", "iot-full", "custom", "off"]);
   assert.ok(Array.isArray(read.payload.choices.presets), "第二级是预设清单");
   assert.equal(typeof read.payload.choices.presetDirSet, "boolean");
 

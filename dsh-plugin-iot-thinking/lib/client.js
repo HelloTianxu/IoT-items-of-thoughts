@@ -43,9 +43,9 @@ window.__ModuleLoader__.load({
     // always sends the real catalog, so this is only the pre-load placeholder
     // (and the degraded view when /status is unreachable).
     const STRATEGY_FALLBACK = [
-      { id: "iot-compact", label: "决策 · 极简（3 标签）", family: "items", summary: "压得最狠，短任务用。", defaults: { minChars: 400, maxChars: 24000, maxTokens: 2000, maxNodes: 5, maxNeutral: 0 } },
-      { id: "iot-balanced", label: "决策 · 均衡（5 标签）", family: "items", summary: "保留计划与决定。", defaults: { minChars: 400, maxChars: 24000, maxTokens: 2000, maxNodes: 6, maxNeutral: 0 } },
-      { id: "iot-full", label: "决策 · 完整（8 标签）", family: "items", summary: "8 标签全量，质量优先。", defaults: { minChars: 400, maxChars: 24000, maxTokens: 2000, maxNodes: 8, maxNeutral: 2 } },
+      { id: "iot-compact", label: "压缩 · 极简（3 标签）", family: "items", summary: "压得最狠，短任务用。", defaults: { minChars: 400, maxChars: 24000, maxTokens: 2000, maxNodes: 5, maxNeutral: 0 } },
+      { id: "iot-balanced", label: "压缩 · 均衡（5 标签）", family: "items", summary: "保留计划与决定。", defaults: { minChars: 400, maxChars: 24000, maxTokens: 2000, maxNodes: 6, maxNeutral: 0 } },
+      { id: "iot-full", label: "压缩 · 完整（8 标签）", family: "items", summary: "8 标签全量，质量优先。", defaults: { minChars: 400, maxChars: 24000, maxTokens: 2000, maxNodes: 8, maxNeutral: 2 } },
       { id: "off", label: "关闭（本会话不做任何改写）", family: "off", summary: "保留原生 thinking。", defaults: { minChars: 0, maxChars: 0, maxTokens: 0 } },
     ];
 
@@ -264,7 +264,7 @@ window.__ModuleLoader__.load({
       const [saved, setSaved] = useState(null);
       /** 所有下拉共用的一份"可选值"：内置档位 + 目录里的自定义预设 + 贴入的文本。 */
       const [choices, setChoices] = useState({ tiers: [], presets: [] });
-      /** 自定义预设（第 4 项）的目录与文件列表。 */
+      /** 用户配置（自定义预设）的目录与文件列表。 */
       const [presetFiles, setPresetFiles] = useState([]);
       /** 内置预设（随插件发布，只读）：清单来自 /api/status 的 choices。 */
       const [builtinPresets, setBuiltinPresets] = useState([]);
@@ -755,7 +755,8 @@ window.__ModuleLoader__.load({
         const tier = tiers.find((entry) => entry.value === tierOf(strategy));
         if (tierOf(strategy) !== "custom") return tier ? tier.label : strategy;
         const preset = presetChoices.find((entry) => entry.value === strategy);
-        return "自定义预设 · " + (preset ? preset.label : strategy === "custom" ? "贴入的文本" : strategy);
+        // 自定义档位不叫"第 4 项"：直接显示用户配置的名字（内置预设名 / 文件名 / 贴入的文本）。
+        return preset ? preset.label : strategy === "custom" ? "贴入的文本" : strategy;
       };
 
       const activeId = cfg.strategy ?? "iot-full";
@@ -773,7 +774,7 @@ window.__ModuleLoader__.load({
       const isCustomValue = (value) => typeof value === "string" && (value === "custom" || value.startsWith("custom:"));
       const active = catalog.find((entry) => entry.id === activeId)
         ?? STRATEGY_FALLBACK.find((entry) => entry.id === activeId)
-        ?? (isCustomValue(activeId) ? { id: "custom", family: "custom", label: "自定义预设", summary: "用你自己写的文本当改写指令。" } : null);
+        ?? (isCustomValue(activeId) ? { id: "custom", family: "custom", label: "用户配置", summary: "用你自己写的文本当改写指令。" } : null);
       const activeLimits = isCustomValue(activeId)
         ? { ...((catalog.find((entry) => entry.id === "custom") ?? STRATEGY_FALLBACK.find((entry) => entry.id === "custom") ?? {}).defaults ?? {}), ...((cfg.strategies ?? {}).custom ?? {}) }
         : limitsFor(catalog, cfg, activeId);
@@ -812,7 +813,7 @@ window.__ModuleLoader__.load({
             h("div", { style: { fontSize: 15, fontWeight: 600, marginBottom: 4 } }, "IoT 思考改写"),
             h("div", { style: hint },
               "thinking 块结束时按选定档位改写它并原地替换。三档决策模式压成带标签的节点（必须更短）；",
-              "自定义预设按你的文本改写；off 原样放行。不插入「上下文已压缩」，也不产生 checkpoint。")
+              "用户配置按你的文本改写；off 原样放行。不插入「上下文已压缩」，也不产生 checkpoint。")
           ),
           h("label", { style: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" } },
             h("input", { type: "checkbox", checked: cfg.enabled === true, onChange: (e) => set({ enabled: e.target.checked }) }),
@@ -862,7 +863,7 @@ window.__ModuleLoader__.load({
           ),
           tierOf(activeId) === "custom" && presetChoices.length === 0
             ? h("div", { style: { ...hint, marginTop: 4, color: "#b76e00" } },
-                choices.presetDirSet ? "目录里还没有预设文件 —— 在第 4 项「新建预设」建一个，或直接用贴入的文本。" : "还没有配置预设目录 —— 只能先用贴入的文本（第 4 项）。")
+                choices.presetDirSet ? "目录里还没有预设文件 —— 在「用户配置」里新建一个，或直接用贴入的文本。" : "还没有配置预设目录 —— 只能先用贴入的文本。")
             : null,
           h("div", { style: limitsGrid },
             ...limitFields.map((field) => h("label", { key: field.key, style: limitCell },
@@ -1328,7 +1329,7 @@ window.__ModuleLoader__.load({
             h("span", { style: hint }, "默认文本可编辑 · 随插件发布")
           ),
           h("div", { style: { ...hint, marginTop: 4 } },
-            "不想自己写规格时，直接点一个。它们只在「自定义预设」档位下生效：点「用这个」会同时把默认档位切到自定义预设。正文可以改——改过的正文存在配置里，随时能恢复默认。"),
+            "不想自己写规格时，直接点一个。它们只在「用户配置」档位下生效：点「用这个」会同时把默认档位切到用户配置。正文可以改——改过的正文存在配置里，随时能恢复默认。"),
           builtinPresets.length === 0
             ? h("div", { style: { ...hint, marginTop: 6 } }, "宿主没有下发内置清单（旧版本或 headless 组合）。")
             : h("div", { style: { border: "1px solid var(--dsw-alias-border-l2, #e6e9ee)", borderRadius: 8, overflow: "hidden", marginTop: 8 } },
@@ -1400,10 +1401,10 @@ window.__ModuleLoader__.load({
             : null
         ),
 
-        // ── 第 4 项：自定义预设 ─────────────────────────────────────────────
+        // ── 用户配置（自定义预设） ──────────────────────────────────────────
         h("div", { style: section },
           h("div", { style: sectionHead },
-            h("div", { style: sectionTitle }, "自定义预设（第 4 项）"),
+            h("div", { style: sectionTitle }, "用户配置（自定义预设）"),
             h("span", { style: hint }, presetDirSet ? presetFiles.length + " 个文件" : "未配置目录")
           ),
           h("div", { style: { ...hint, marginTop: 4 } },

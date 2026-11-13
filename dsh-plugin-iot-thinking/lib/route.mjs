@@ -11,12 +11,30 @@ import {
 } from "./strategies.mjs";
 import { builtinPresetById } from "./builtin-presets.mjs";
 
+/**
+ * 旧档位别名：`iot-guided` 曾经是"压缩 + 内置建议"的独立档位。
+ *
+ * 它其实是 `iot-full` + `guidance.mode = "builtin"` 的另一种写法 —— 两套表达同一件事，
+ * 界面上就出现了"决策 · 指导"这种让人迷惑的档位。现在把它降级成别名：
+ * 读到旧值仍能工作，但列表里只剩决策强度（极简/均衡/完整）与建议开关两个正交维度。
+ */
+export const LEGACY_STRATEGY_ALIAS = Object.freeze({
+  "iot-guided": { id: "iot-full", guidance: { mode: "builtin" } },
+});
+
 /** 归一化一个策略 id；不认识就返回 null（调用方继续往下一层找）。 */
 export function normalizeStrategyId(value) {
   if (typeof value !== "string") return null;
   const id = value.trim();
   if (!id) return null;
+  const alias = LEGACY_STRATEGY_ALIAS[id];
+  if (alias) return alias.id;
   return strategyById(id) ? id : null;
+}
+
+/** 旧档位是不是被别名折叠了：调用方据此补上它隐含的建议开关。 */
+export function legacyAliasOf(value) {
+  return typeof value === "string" ? LEGACY_STRATEGY_ALIAS[value.trim()] ?? null : null;
 }
 
 /**
@@ -94,16 +112,23 @@ export function resolveRoute(cfg, who = {}) {
   const agentPreset = who.agentPreset === undefined || who.agentPreset === null ? "" : String(who.agentPreset);
 
   const fromSession = pick(cfg?.sessions, sessionId);
-  if (fromSession) return { ...fromSession, source: "session", key: sessionId };
+  if (fromSession) {
+    const alias = legacyAliasOf(cfg?.sessions?.[sessionId]);
+    return { ...fromSession, source: "session", key: sessionId, ...(alias ? { legacyGuidance: alias.guidance } : {}) };
+  }
 
   const fromPreset = pick(cfg?.agentPresets, agentPreset);
-  if (fromPreset) return { ...fromPreset, source: "preset", key: agentPreset };
+  if (fromPreset) {
+    const alias = legacyAliasOf(cfg?.agentPresets?.[agentPreset]);
+    return { ...fromPreset, source: "preset", key: agentPreset, ...(alias ? { legacyGuidance: alias.guidance } : {}) };
+  }
 
   // custom 也是注册过的策略 id：先按 entry 解析，才不丢名字。
   const globalEntry = normalizeEntryString(cfg?.strategy);
   if (globalEntry?.id === "custom") return { id: "custom", custom: globalEntry.custom ?? null, source: "default" };
+  const globalAlias = legacyAliasOf(cfg?.strategy);
   const global = normalizeStrategyId(cfg?.strategy);
-  if (global) return { id: global, source: "default" };
+  if (global) return { id: global, source: "default", ...(globalAlias ? { legacyGuidance: globalAlias.guidance } : {}) };
 
   const legacy = normalizeStrategyId(LEGACY_PROFILE_TO_STRATEGY[String(cfg?.profile ?? "")]);
   if (legacy) return { id: legacy, source: "profile", key: String(cfg?.profile) };
@@ -173,10 +198,12 @@ export function resolveConfig(cfg, who = {}) {
   const guidanceExplicit = base.__guidanceExplicit === true
     || (base.__guidanceExplicit === undefined && base.guidance !== undefined);
   const guidanceRaw = base.guidance && typeof base.guidance === "object" ? base.guidance : null;
+  // 旧 `iot-guided` 档被别名折叠成 iot-full，它隐含的"内置建议"由 route.legacyGuidance 带上来。
+  const legacyGuidance = route.legacyGuidance ?? null;
   const globalGuidance = guidanceExplicit && guidanceRaw
     ? { enabled: guidanceRaw.enabled === true, mode: guidanceRaw.mode === "builtin" ? "builtin" : "external" }
-    : route.id === "iot-guided"
-      ? { enabled: true, mode: "builtin" }
+    : legacyGuidance
+      ? { enabled: true, mode: legacyGuidance.mode === "builtin" ? "builtin" : "external" }
       : { enabled: false, mode: "external" };
   // 会话级指导覆盖：null = 跟随全局；只给 enabled 时 mode 继承全局。
   const sessionGuidance = who.sessionId && base.sessions && typeof base.sessions === "object"

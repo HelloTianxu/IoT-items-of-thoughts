@@ -89,7 +89,7 @@ function itemsStrategy({ id, label, profile, summary, defaults }) {
 function customStrategy() {
   return Object.freeze({
     id: "custom",
-    label: "自定义预设（第 4 项）",
+    label: "用户配置",
     family: "custom",
     summary: "用你自己的文本当改写指令：从你指定的预设目录选一份，或直接粘进来。",
     defaults: Object.freeze({
@@ -173,32 +173,23 @@ function offStrategy() {
 export const STRATEGIES = Object.freeze([
   itemsStrategy({
     id: "iot-compact",
-    label: "决策 · 极简（3 标签）",
+    label: "压缩 · 极简（3 标签）",
     profile: "compact",
     summary: "3 标签、3~4 条节点。压得最狠，适合只想赶快接着干的短任务。",
     defaults: {},
   }),
   itemsStrategy({
     id: "iot-balanced",
-    label: "决策 · 均衡（5 标签）",
+    label: "压缩 · 均衡（5 标签）",
     profile: "balanced",
     summary: "5 标签、4~6 条节点，保留 [计划] 与 [决定]。",
     defaults: {},
   }),
   itemsStrategy({
     id: "iot-full",
-    label: "决策 · 完整（8 标签）",
+    label: "压缩 · 完整（8 标签）",
     profile: "full",
     summary: "8 标签、4~6 条节点。[权衡]/[风险]/[待定] 都保留，质量优先。",
-    defaults: {},
-  }),
-  // 模式一：同一次压缩调用里，压缩器自己兼任教师，额外输出 1~2 条 [指导]。
-  // 本质仍是压缩（一次调用、一份输出），不是"另发一路强模型"。
-  itemsStrategy({
-    id: "iot-guided",
-    label: "决策 · 指导（压缩 + 教师建议）",
-    profile: "guided",
-    summary: "8 标签压缩 + 1~2 条 [指导] 建议；不额外调用模型，成本与完整档相同。",
     defaults: {},
   }),
   customStrategy(),
