@@ -5,7 +5,7 @@
 
 import { DEFAULT_STRATEGY, isShorterReplacement, strategyById } from "./strategies.mjs";
 import { appendAdvice } from "./advisor.mjs";
-import { formatTeacherStatus, noteBlock, normalizeTeacherLimits, teacherStatus } from "./teacher.mjs";
+import { noteBlock } from "./teacher.mjs";
 
 export { isShorterReplacement };
 
@@ -143,21 +143,8 @@ export async function* transformStream(source, options, deps) {
 
     const body = candidate.trim();
     const withAdvice = appendAdvice(body, advice);
-    // 教师咨询的冷却状态：固定格式、固定位置（末尾），属于"状态"不是"内容"。
-    // 它在这里追加，所以不会被压缩器重映射/截断。
-    // resolveConfig 已把全局默认与会话覆盖合并进 cfg.teacher（会话只能改开关）。
-    const teacherCfg = cfg?.teacher && typeof cfg.teacher === "object" ? cfg.teacher : null;
-    // 状态行与 tool 执行必须用同一份归一化后的 limits：配置里是 depthRange，
-    // 状态行读的是 minDepth/maxDepth —— 直接传原始配置会显示 undefined-undefined。
-    const statusLine = teacherCfg?.enabled === true
-      ? (() => {
-          const limits = normalizeTeacherLimits(teacherCfg);
-          return formatTeacherStatus(teacherStatus(options?.sessionId, limits), limits);
-        })()
-      : "";
-    const text = statusLine ? `${withAdvice}\n\n${statusLine}` : withAdvice;
+    const text = withAdvice;
     if (advice) emit("advisor-appended", { index, adviceLines: String(advice).split("\n\n").length, charsAdded: withAdvice.length - body.length });
-    if (statusLine) emit("teacher-status-appended", { index, status: statusLine });
     yield { type: "reasoning-delta", index, text };
     yield { ...block, type: "block-end", index, block: { ...block.block, text } };
     buffers.delete(index);

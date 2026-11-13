@@ -11,6 +11,7 @@ import { archiveOriginal, mark } from "./lib/ledger.mjs";
 import { resolveConfig } from "./lib/route.mjs";
 import { switchSessionStrategy } from "./lib/switch.mjs";
 import { transformStream } from "./lib/stream.mjs";
+import { TEACHER_CONTEXT_NAME, TEACHER_CONTEXT_ORDER, clampContext, teacherContextText } from "./lib/teacher-prompt.mjs";
 import {
   ASK_KINDS,
   TEACHER_LIMITS,
@@ -276,6 +277,30 @@ export function apply(ctx, config = {}) {
     const unregister = toolCtx.tools.register(teacherTool());
     mark("teacher-tool-registered", { name: "iot_consult_teacher" });
     return () => unregister();
+  });
+
+  // 教师能力的上下文注入：写进 system prompt，而不是 thinking 末尾的状态行。
+  // 未启用时返回空串 —— 空 context 不进提示词，也就不会污染缓存前缀。
+  ctx.inject(["systemPrompt"], (promptCtx) => {
+    const dispose = promptCtx.systemPrompt.context({
+      name: TEACHER_CONTEXT_NAME,
+      order: TEACHER_CONTEXT_ORDER,
+      text: (context) => {
+        try {
+          const sessionId = sessionIdOf({ agent: context?.agent, sessionId: context?.agent?.sessionId });
+          const cfg = store.load();
+          const resolved = resolveConfig(cfg, { sessionId, agentPreset: agentPresetFor(ctx, sessionId) });
+          const enabled = cfg.enabled !== false && resolved.teacher?.enabled === true;
+          if (!enabled) return "";
+          return clampContext(teacherContextText({ enabled: true, sessionId, limits: resolved.teacher }));
+        } catch {
+          // 注入失败不该打断组装：返回空串等于这段不出现。
+          return "";
+        }
+      },
+    });
+    mark("teacher-context-registered", { name: TEACHER_CONTEXT_NAME, order: TEACHER_CONTEXT_ORDER });
+    return () => dispose();
   });
 
   mark("constructed", { configPath: store.path, strategy: store.load().strategy });

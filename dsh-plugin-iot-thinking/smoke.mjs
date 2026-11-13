@@ -97,6 +97,7 @@ const { importSeam } = await import(pathToFileURL(join(pluginDir, "lib", "seams.
 const Llm = await importSeam("@deepseek-ai/dsh-llm");
 
 const tools = new Map();
+const promptContexts = new Map();
 const plugin = await import(pathToFileURL(join(pluginDir, "index.mjs")).href);
 assert.equal(plugin.name, "iot-thinking");
 assert.deepEqual(plugin.inject, ["llm"]);
@@ -164,12 +165,18 @@ const ctx = {
   effect: () => {},
   // 真的执行回调：教师工具的注册路径必须被走到，否则"注册了但没人调"测不出来。
   inject: (_names, factory) => factory({
-    // 回调拿到的是"子 fiber"上下文：这里给足插件实际会用到的两样东西。
+    // 回调拿到的是"子 fiber"上下文：这里给足插件实际会用到的三样东西。
     get: (name) => (name === "webServer" ? webServer : undefined),
     tools: {
       register: (definition) => {
         tools.set(definition.name, definition);
         return () => tools.delete(definition.name);
+      },
+    },
+    systemPrompt: {
+      context: (entry) => {
+        promptContexts.set(entry.name, entry);
+        return () => promptContexts.delete(entry.name);
       },
     },
   }),
@@ -191,6 +198,12 @@ assert.ok(tools.has("iot_consult_teacher"), "iot_consult_teacher registered");
   const params = tool.parameters?.properties ?? tool.parameters ?? {};
   assert.ok(params.depth && params.ask, "参数声明完整");
   assert.ok(tool.output && typeof tool.output.render === "function", "输出 render 存在");
+}
+// 教师能力必须作为 system prompt 上下文注册（而不是 thinking 末尾的状态行）。
+assert.ok(promptContexts.has("iot-thinking.teacher"), "teacher context registered");
+{
+  const entry = promptContexts.get("iot-thinking.teacher");
+  assert.equal(typeof entry.text, "function", "注入文本要按当前配置生成");
 }
 
 // One real agent-loop request: a reasoning block that must be compressed in

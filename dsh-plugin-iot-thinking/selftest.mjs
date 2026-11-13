@@ -60,6 +60,7 @@ import {
 } from "./lib/strategies.mjs";
 import { switchSessionStrategy } from "./lib/switch.mjs";
 import { buildCustomPrompt, injectTextOf, listPresets, readPreset, resolvePresetDir, writePreset } from "./lib/custom.mjs";
+import { TEACHER_CONTEXT_MAX_CHARS, clampContext, teacherContextText } from "./lib/teacher-prompt.mjs";
 import {
   ASK_KINDS,
   adviceMuted,
@@ -121,7 +122,7 @@ function strictCreateUserMessage(input) {
 
 const source = () => chunks([start(), delta("abcde"), delta("fghij"), end("abcdefghij"), textDelta("hello"), finish()]);
 
-await check("教师状态行穿过 stream：显示真实深度，咨询后冷却按块递减", async () => {
+await check("教师状态改走 system prompt：thinking 里不再出现 [教师] 行，CD 仍按块推进", async () => {
   resetTeacherState();
   const teacher = { enabled: true, depthRange: [1, 5], cooldownBlocks: 3 };
   const options = { ...baseOptions, sessionId: "stream-teacher" };
@@ -135,17 +136,17 @@ await check("教师状态行穿过 stream：显示真实深度，咨询后冷却
     return out.find((chunk) => chunk.type === "block-end")?.block?.text ?? "";
   };
   const first = await run();
-  assert.ok(first.includes("[教师] 可用"), "首块应显示可用");
-  assert.ok(first.includes("深度 1-5"), "深度必须是真实范围，不是 undefined：" + first);
+  assert.ok(!first.includes("[教师]"), "thinking 里不该再有状态行：" + first);
   assert.ok(!first.includes("undefined"), "不能出现 undefined");
-  // 模拟一次咨询成功后进入冷却。
+  // CD 仍然按块推进：咨询后三块应该回到可用。
   markConsulted("stream-teacher", { cooldownBlocks: 3 });
-  const cooling = await run();
-  assert.ok(cooling.includes("[教师] 冷却中"), "咨询后应显示冷却");
-  assert.ok(cooling.includes("还需 3 块"), "刚咨询后是 3 块：" + cooling);
-  // 再跑一块，应该递减到 2。
-  const next = await run();
-  assert.ok(next.includes("还需 2 块"), "块推进要递减：" + next);
+  assert.equal(canConsult("stream-teacher"), false, "咨询后进入冷却");
+  await run();
+  assert.equal(teacherStatus("stream-teacher", { cooldownBlocks: 3 }).remainingBlocks, 2, "块推进要递减");
+  await run();
+  assert.equal(teacherStatus("stream-teacher", { cooldownBlocks: 3 }).remainingBlocks, 1);
+  await run();
+  assert.equal(canConsult("stream-teacher"), true, "三块之后恢复可用");
   resetTeacherState();
 });
 
@@ -2154,6 +2155,38 @@ await check("教师冷却：调用后进入 CD，按块递减，冷却中拒绝�
   // 会话隔离：另一个会话不受影响。
   assert.equal(canConsult("s2"), true);
   resetTeacherState();
+});
+
+await check("教师上下文注入：写清是什么、能干什么、当前状态，且不超字数", () => {
+  resetTeacherState();
+  const limits = { depthRange: [2, 4], cooldownBlocks: 2 };
+  const text = teacherContextText({ enabled: true, sessionId: "ctx-1", limits });
+  assert.ok(text.includes("iot_consult_teacher"), "要说明工具名");
+  assert.ok(text.includes("外援"), "要说明这是外援能力");
+  assert.ok(text.includes("现在可用"), "要说明当前状态");
+  assert.ok(text.includes("2-4"), "要说明能要几轮上下文");
+  assert.ok(!text.includes("undefined"), "不能出现 undefined");
+  assert.ok(text.length <= TEACHER_CONTEXT_MAX_CHARS, "不能超字数上限：" + text.length);
+
+  // 冷却时说明还要几块，而不是只写"冷却中"。
+  markConsulted("ctx-1", limits);
+  const cooling = teacherContextText({ enabled: true, sessionId: "ctx-1", limits });
+  assert.ok(cooling.includes("冷却中"), "要说明冷却");
+  assert.ok(cooling.includes("2"), "要说明还剩几块");
+  assert.ok(!cooling.includes("现在可用"), "冷却时不能说可用");
+
+  // 未启用时不注入。
+  assert.equal(teacherContextText({ enabled: false, sessionId: "ctx-1", limits }), "");
+  resetTeacherState();
+});
+
+await check("教师上下文截断：超长按句号切，不切半个句子", () => {
+  const long = "第一句话说明这是什么。第二句话说明能干什么。第三句话说明当前状态。".repeat(4);
+  const cut = clampContext(long, 60);
+  assert.ok(cut.length <= 60, "不能超上限");
+  assert.ok(cut.endsWith("。"), "要在句号处切：" + cut);
+  assert.equal(clampContext("短文本", 60), "短文本", "不超上限时原样返回");
+  assert.equal(clampContext("", 60), "");
 });
 
 await check("教师配置归一化：depthRange 转成 minDepth/maxDepth，状态行不再显示 undefined", () => {
