@@ -69,6 +69,8 @@ export const DEFAULTS = Object.freeze({
      * 慢的指导模型不该拖住整个任务流程。
      */
     wait: true,
+    /** 建议输出 token 预算；不配时按 maxChars 推算（中文约 2 token/字）。 */
+    maxTokens: null,
     timeoutMs: 30000,
     maxAdvice: 3,
     maxChars: 600,
@@ -199,6 +201,7 @@ function advisorConfig(value) {
     effort: effort ?? "auto",
     temperature: raw.temperature === null ? null : Number.isFinite(raw.temperature) ? raw.temperature : 0.3,
     wait: raw.wait !== false,
+    maxTokens: Number.isFinite(raw.maxTokens) ? clampInt(raw.maxTokens, 200, 8000, 1200) : null,
     timeoutMs: clampInt(raw.timeoutMs, 3000, 120000, 30000),
     maxAdvice: clampInt(raw.maxAdvice, 1, 3, 3),
     maxChars: clampInt(raw.maxChars, 80, 600, 600),

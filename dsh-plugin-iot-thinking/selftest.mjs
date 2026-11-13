@@ -1677,6 +1677,51 @@ await check("配置存储：rewrite 块只收已知键，非法 fallback 落回 
   assert.equal(second.rewrite.model, "other");
 });
 
+await check("配置存储：advisor.wait/maxTokens 归一化，且增量保存不抹掉 route", () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-advisor-"));
+  const store = new ConfigStore(join(dir, "config.json"));
+  store.save({ advisor: { route: { provider: "strong", model: "s" }, wait: false, maxTokens: 5000 } });
+  const first = store.load();
+  assert.equal(first.advisor.wait, false);
+  assert.equal(first.advisor.maxTokens, 5000);
+  assert.equal(first.advisor.route.provider, "strong");
+
+  // 只改开关：route 与预算必须保留。
+  store.save({ advisor: { wait: true } });
+  const second = store.load();
+  assert.equal(second.advisor.wait, true);
+  assert.equal(second.advisor.route.model, "s", "增量保存不能抹掉 route");
+  assert.equal(second.advisor.maxTokens, 5000, "增量保存不能抹掉 maxTokens");
+
+  // 非法值落回默认：wait 只认布尔，maxTokens 有上下限。
+  store.save({ advisor: { wait: "yes", maxTokens: 99999 } });
+  const third = store.load();
+  assert.equal(third.advisor.wait, true, "非布尔值不该落盘");
+  assert.equal(third.advisor.maxTokens, 8000, "上限 8000");
+});
+
+await check("配置 API：advisor.wait 与 maxTokens 只收合法值", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-api-wait-")), "config.json"));
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const res = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ advisor: { wait: false, maxTokens: 1500 } }),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.payload.config.advisor.wait, false);
+  assert.equal(res.payload.config.advisor.maxTokens, 1500);
+
+  const bad = await ws.call("/iot-thinking/api/config", {
+    method: "PUT",
+    body: JSON.stringify({ advisor: { wait: "no", maxTokens: "big" } }),
+  });
+  assert.equal(bad.statusCode, 200);
+  assert.equal(bad.payload.config.advisor.wait, false, "非法 wait 保持原值");
+  assert.equal(bad.payload.config.advisor.maxTokens, 1500, "非法 maxTokens 保持原值");
+});
+
 await check("卸载：压缩调用真的发往配置的路由，并记账 offloaded", async () => {
   const calls = [];
   const events = [];
@@ -1870,6 +1915,38 @@ await check("指导层：关闭时不多打一次模型", async () => {
   assert.equal(calls.length, 1);
 });
 
+await check("建议输出预算按 maxChars 推算，避免固定 800 截断", async () => {
+  const seen = [];
+  const ctx = {
+    llm: {
+      stream: (options) => {
+        if (options.model !== "strong") {
+          return chunks([{ type: "text-delta", index: 0, text: "[决定] 先做替换闸门。" }, { type: "finish", reason: { kind: "stop" } }]);
+        }
+        seen.push(options.maxTokens);
+        return chunks([{ type: "text-delta", index: 0, text: "[旁观者建议] 先补测试。" }, { type: "finish", reason: { kind: "stop" } }]);
+      },
+    },
+  };
+  const base = {
+    strategy: "iot-full",
+    rewrite: { provider: "weak", model: "weak" },
+    guidance: { enabled: true, mode: "external" },
+  };
+  await compressWith(ctx, {
+    cfg: { ...base, advisor: { route: { provider: "strong", model: "strong" }, maxChars: 600 } },
+    text: DRAFT.repeat(2),
+  });
+  assert.equal(seen[0], 1200, "maxChars=600 应给 1200 token");
+
+  seen.length = 0;
+  await compressWith(ctx, {
+    cfg: { ...base, advisor: { route: { provider: "strong", model: "strong" }, maxChars: 600, maxTokens: 3000 } },
+    text: DRAFT.repeat(2),
+  });
+  assert.equal(seen[0], 3000, "显式 maxTokens 优先");
+});
+
 await check("可选建议：wait=false 时压缩不等指导，慢模型不拖流程", async () => {
   const events = [];
   const ctx = {
@@ -1900,6 +1977,10 @@ await check("可选建议：wait=false 时压缩不等指导，慢模型不拖�
   assert.ok(!result.advice, "没赶上的建议要丢弃");
   assert.ok(elapsed < 120, "不能等慢指导（实际 " + elapsed + "ms）");
   assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "not-ready"), "要记账 not-ready");
+  // 晚到的建议不能既记 ready 又记 skipped：同一块只允许一个结论。
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  assert.ok(events.some((entry) => entry.event === "advisor-discarded"), "晚到的建议要记 discarded");
+  assert.ok(!events.some((entry) => entry.event === "advisor-ready"), "跳过之后不应再记 ready");
 });
 
 await check("可选建议：wait=true 时仍然等待并合并", async () => {
@@ -2080,6 +2161,16 @@ await check("指导调用正文为空：区分截断与只想不说，都返回 
   const raw = await advise({ ctx, Llm: fakeLlm(), route: { provider: "p", model: "m" }, prompt: "评审", options: {}, timeoutMs: 5000, onEvent: (event, fields) => events.push({ event, ...fields }) });
   assert.equal(raw, null);
   assert.ok(events.some((entry) => entry.event === "advisor-skipped" && entry.reason === "truncated-no-text"));
+});
+
+await check("标签归一：无方括号的「旁观者建议：」「建议：」也识别为建议节点", () => {
+  const out = formatNodes(
+    "[决定] 先做替换闸门。\n旁观者建议：先补测试。\n建议：把同步等待改成异步。",
+    { maxNodes: 8, maxNeutral: 2, labels: ["支持", "反对", "中性", "计划", "权衡", "待定", "风险", "决定", "旁观者建议"], allowAdvice: true },
+  );
+  assert.ok(out.includes("[旁观者建议] 先补测试。"), "无方括号的建议标签要归一");
+  assert.ok(out.includes("[旁观者建议] 把同步等待改成异步。"));
+  assert.ok(!/^(旁观者建议|建议)：/m.test(out), "不应残留裸标签");
 });
 
 await check("标签改名兼容：旧的 [指导] / 【指导】/ 指导： 都归一成 [旁观者建议]", () => {

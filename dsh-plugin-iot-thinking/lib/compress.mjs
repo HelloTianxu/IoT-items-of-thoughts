@@ -443,7 +443,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
   const guidanceOn = guidance.enabled === true;
 
   /** 指导请求的落地状态：`wait` 为 false 时，压缩一完成就只看它有没有恰好就绪。 */
-  const adviceState = { settled: false, result: null };
+  const adviceState = { settled: false, result: null, discarded: false };
 
   const startAdvice = () => {
     if (!guidanceOn) return null;
@@ -481,6 +481,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
       trace,
       effort: advisorCfg.effort,
       temperature: advisorCfg.temperature,
+      maxTokens: advisorCfg.maxTokens ?? Math.max(400, Math.ceil((Number(advisorCfg.maxChars) || 600) * 2)),
       onEvent: (event, fields) => mark(event, { index, strategy: strategy.id, ...fields }),
     }).then((raw) => {
       // 空输出/截断的原因已经由 advise 自己记账（advisor-skipped），这里不再重复。
@@ -490,14 +491,28 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
         mark("advisor-skipped", { index, strategy: strategy.id, reason: "no-usable-line" });
         return null;
       }
-      mark("advisor-ready", {
-        index,
-        strategy: strategy.id,
-        provider: advisorRoute.provider,
-        model: advisorRoute.model,
-        adviceLines: advice.split("\n\n").length,
-        charsOut: advice.length,
-      });
+      // 已经被 wait=false 跳过的那一块：不要再记 ready（否则同一块既有 skipped 又有 ready，
+      // 账本自相矛盾），改记 discarded 说明"建议到了但没用上"。
+      if (adviceState.discarded) {
+        mark("advisor-discarded", {
+          index,
+          strategy: strategy.id,
+          provider: advisorRoute.provider,
+          model: advisorRoute.model,
+          adviceLines: advice.split("\n\n").length,
+          charsOut: advice.length,
+          reason: "not-ready",
+        });
+      } else {
+        mark("advisor-ready", {
+          index,
+          strategy: strategy.id,
+          provider: advisorRoute.provider,
+          model: advisorRoute.model,
+          adviceLines: advice.split("\n\n").length,
+          charsOut: advice.length,
+        });
+      }
       return {
         advice,
         event: { provider: advisorRoute.provider, model: advisorRoute.model, offloaded: advisorRoute.offloaded, lines: advice.split("\n\n").length },
@@ -526,6 +541,7 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     if (!pending) return { text: nodes, advice: null, event: null };
     const wait = cfg.advisor?.wait !== false;
     if (!wait && !adviceState.settled) {
+      adviceState.discarded = true;
       mark("advisor-skipped", { index, strategy: strategy.id, reason: "not-ready" });
       return { text: nodes, advice: null, event: null };
     }

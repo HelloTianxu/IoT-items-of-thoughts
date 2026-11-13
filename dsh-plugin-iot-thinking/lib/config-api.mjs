@@ -333,6 +333,7 @@ function sanitize(payload) {
     if (raw.temperature === null) out.temperature = null;
     else if (Number.isFinite(raw.temperature)) out.temperature = raw.temperature;
     if (typeof raw.wait === "boolean") out.wait = raw.wait;
+    if (Number.isFinite(raw.maxTokens)) out.maxTokens = Math.floor(raw.maxTokens);
     for (const key of ["timeoutMs", "maxAdvice", "maxChars"]) {
       if (Number.isFinite(raw[key])) out[key] = Math.floor(raw[key]);
     }

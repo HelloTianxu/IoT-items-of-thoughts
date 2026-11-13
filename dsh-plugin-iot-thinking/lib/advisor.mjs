@@ -165,7 +165,7 @@ async function probeLowEffortForAdvisor({ ctx, route, options, onEvent }) {
   }
 }
 
-export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace, effort, temperature }) {
+export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEvent, trace, effort, temperature, maxTokens }) {
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const signal = controller?.signal ?? options?.signal;
   let timedOut = false;
@@ -190,7 +190,8 @@ export async function advise({ ctx, Llm, route, prompt, options, timeoutMs, onEv
         provider: route.provider,
         model: route.model,
         messages: [Llm.createUserMessage(prompt)],
-        maxTokens: 800,
+        // 输出预算按建议字数推算：中文 1 字 ≈ 1.5~2 token，固定 800 会在 maxChars=600 时截断。
+        maxTokens: Number.isFinite(maxTokens) ? Math.max(200, Math.floor(maxTokens)) : 1200,
         ...(tempSent === null ? {} : { temperature: tempSent }),
         purpose: "compaction",
         ...(effortSent === null ? {} : { reasoningEffort: effortSent }),
