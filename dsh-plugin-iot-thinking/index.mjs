@@ -222,11 +222,14 @@ export function apply(ctx, config = {}) {
         const depth = Math.max(limits.minDepth, Math.min(limits.maxDepth, Math.floor(Number(args.depth) || limits.minDepth)));
         const session = sessionOf(ctx, sessionId);
         const rounds = extractSessionContext(session, depth);
+        // 上下文用**正文**：之前几轮 assistant 已经产出的正文才是任务的真实状态。
+        // thinking 是给"产出正文"服务的中间产物，教师不需要看它（也最贵）。
+        const lastBody = rounds.length ? rounds[rounds.length - 1].assistant : "";
         const prompt = buildTeacherPrompt({
           goal: args.goal,
           progress: args.progress,
           rounds,
-          draft: recentFor(sessionId).slice(-1)[0] ?? "",
+          draft: lastBody,
           ask: args.ask,
           limits,
         });

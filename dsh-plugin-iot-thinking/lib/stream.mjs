@@ -137,7 +137,8 @@ export async function* transformStream(source, options, deps) {
     const withAdvice = appendAdvice(body, advice);
     // 教师咨询的冷却状态：固定格式、固定位置（末尾），属于"状态"不是"内容"。
     // 它在这里追加，所以不会被压缩器重映射/截断。
-    const teacherCfg = cfg?.advisor?.teacher && typeof cfg.advisor.teacher === "object" ? cfg.advisor.teacher : null;
+    // resolveConfig 已把全局默认与会话覆盖合并进 cfg.teacher（会话只能改开关）。
+    const teacherCfg = cfg?.teacher && typeof cfg.teacher === "object" ? cfg.teacher : null;
     const statusLine = teacherCfg?.enabled === true
       ? formatTeacherStatus(teacherStatus(options?.sessionId, teacherCfg), teacherCfg)
       : "";

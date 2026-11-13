@@ -1255,7 +1255,7 @@ window.__ModuleLoader__.load({
           sessionKeys.length === 0
             ? h("div", { style: { ...hint, marginTop: 8 } }, "当前没有任何会话覆盖。")
             : h("div", { style: { ...mappingTable, marginTop: 8 } },
-                ...sessionKeys.map((sid) => h("div", { key: sid, style: { ...mappingRow, gridTemplateColumns: "minmax(0,1fr) 130px 120px 60px" } },
+                ...sessionKeys.map((sid) => h("div", { key: sid, style: { ...mappingRow, gridTemplateColumns: "minmax(0,1fr) 130px 110px 110px 60px" } },
                   h("span", { style: { ...monoLabel, fontWeight: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, sid),
                   h("span", { style: { ...hint, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, choiceLabel(cfg.sessions[sid])),
                   h("select", {
@@ -1280,6 +1280,28 @@ window.__ModuleLoader__.load({
                     h("option", { value: "off" }, "建议关闭"),
                     h("option", { value: "builtin" }, "内置建议"),
                     h("option", { value: "external" }, "外部建议")
+                  ),
+                  // 教师开关：会话级独立于全局；全局没开时这里勾上也能用。
+                  h("select", {
+                    value: (() => {
+                      const entry = cfg.sessions[sid];
+                      const t = entry && typeof entry === "object" ? entry.teacher : undefined;
+                      if (t === null || t === undefined) return "follow";
+                      return t.enabled === true ? "on" : "off";
+                    })(),
+                    style: { ...input, padding: "2px 4px", fontSize: 12 },
+                    onChange: (e) => {
+                      const key = e.target.value;
+                      const teacher = key === "follow" ? null : { enabled: key === "on" };
+                      const entry = cfg.sessions[sid];
+                      const base = typeof entry === "object" ? { ...entry } : { strategy: entry };
+                      base.teacher = teacher;
+                      set({ sessions: { ...(cfg.sessions ?? {}), [sid]: base } });
+                    },
+                  },
+                    h("option", { value: "follow" }, "教师跟随"),
+                    h("option", { value: "on" }, "教师开启"),
+                    h("option", { value: "off" }, "教师关闭")
                   ),
                   h("button", {
                     style: { ...btnSmall, justifySelf: "end" },
@@ -1813,7 +1835,13 @@ window.__ModuleLoader__.load({
             method: "PUT",
             headers: { ...GUARD, "content-type": "application/json" },
             // guidance: null = 跟随全局；对象 = 本会话覆盖。不传 = 保持原值。
-            body: JSON.stringify({ sessionId, strategy, preset, ...(choice?.guidance === undefined ? {} : { guidance: choice.guidance }) }),
+            body: JSON.stringify({
+              sessionId,
+              // 只改教师时不要把 strategy 写成 null —— 那会清掉档位覆盖。
+              ...(choice?.strategy === undefined ? {} : { strategy, preset }),
+              ...(choice?.guidance === undefined ? {} : { guidance: choice.guidance }),
+              ...(choice?.teacher === undefined ? {} : { teacher: choice.teacher }),
+            }),
           });
           const data = await resp.json().catch(() => null);
           if (resp.ok && data && alive.current) {
@@ -1832,7 +1860,7 @@ window.__ModuleLoader__.load({
       };
 
       /** 切档：有会话就立刻写；还没有会话就先记下来，等第一条消息落盘。 */
-      const choose = (strategy, preset = null, guidance) => {
+      const choose = (strategy, preset = null, guidance, extra = {}) => {
         const raw = strategy || null;
         // 把 `custom:名字` 拆成 `{ strategy: "custom", preset: "custom:名字" }`，
         // 让"档位"与"规格"两件事在落盘时就分开。
@@ -1844,6 +1872,7 @@ window.__ModuleLoader__.load({
             : null,
           // 指导选择与档位一起记住：新会话第一条消息落盘时不能丢。
           ...(guidance === undefined ? {} : { guidance }),
+          ...extra,
         };
         if (!sessionId) {
           setPending(choice);
@@ -1884,6 +1913,14 @@ window.__ModuleLoader__.load({
             ? "builtin"
             : "external";
       const globalGuidance = state?.guidance?.global ?? { enabled: false, mode: "external" };
+      const overrideTeacher = state?.override && typeof state.override === "object" ? state.override.teacher : undefined;
+      const pendingTeacher = pending && typeof pending === "object" ? pending.teacher : undefined;
+      const teacherValue = pendingTeacher !== undefined ? pendingTeacher : overrideTeacher;
+      const teacherKey = teacherValue === null || teacherValue === undefined
+        ? "follow"
+        : teacherValue.enabled === true
+          ? "on"
+          : "off";
       const route = state?.route ? state.route.id : "";
       // 「跟随 preset 默认」显示的是没有本会话覆盖时的结果（presetDefault），
       // 不是 route —— route 已经是"含覆盖的生效档位"。
@@ -1948,6 +1985,23 @@ window.__ModuleLoader__.load({
           h("option", { value: "off" }, "关闭"),
           h("option", { value: "builtin" }, "内置建议"),
           h("option", { value: "external" }, "外部建议")
+        ),
+        h("span", { style: { opacity: 0.75 } }, "教师"),
+        h("select", {
+          value: teacherKey,
+          disabled: busy,
+          title: "本会话的教师开关：跟随全局 / 开启（注入 CD 状态、允许模型调用 iot_consult_teacher）/ 关闭",
+          style: selectStyle,
+          onChange: (e) => {
+            const key = e.target.value;
+            const teacher = key === "follow" ? null : { enabled: key === "on" };
+            // 只改教师：不传 strategy，档位覆盖保持原样。
+            choose(undefined, undefined, undefined, { teacher });
+          },
+        },
+          h("option", { value: "follow" }, "跟随全局（" + (state?.teacher?.global ? "开" : "关") + "）"),
+          h("option", { value: "on" }, "开启"),
+          h("option", { value: "off" }, "关闭")
         ),
         current && tierOf(current) === "custom"
           ? h("select", {

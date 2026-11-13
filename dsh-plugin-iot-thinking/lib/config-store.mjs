@@ -166,15 +166,26 @@ function strategyMap(value) {
     const sessionGuidance = entry && typeof entry === "object" && !Array.isArray(entry) && "guidance" in entry
       ? sessionGuidanceValue(entry.guidance)
       : undefined;
-    // 只有 guidance、没有档位的条目也是合法的（"这个会话只关建议，档位跟随默认"）。
-    // 之前 normalizeRouteEntry 返回 null 就把整条丢了，指导覆盖在下次 load 时消失。
+    const sessionTeacher = entry && typeof entry === "object" && !Array.isArray(entry) && "teacher" in entry
+      ? sessionTeacherValue(entry.teacher)
+      : undefined;
+    // 只有 guidance/teacher、没有档位的条目也是合法的（"这个会话只改开关，档位跟随默认"）。
     if (!normalized) {
-      if (sessionGuidance !== undefined) out[key] = { guidance: sessionGuidance };
+      const extra = {};
+      if (sessionGuidance !== undefined) extra.guidance = sessionGuidance;
+      if (sessionTeacher !== undefined) extra.teacher = sessionTeacher;
+      if (Object.keys(extra).length) out[key] = extra;
       continue;
     }
-    const withGuidance = (base) => (sessionGuidance === undefined
-      ? base
-      : { ...(typeof base === "object" ? base : { strategy: base }), guidance: sessionGuidance });
+    const withGuidance = (base) => {
+      let result = sessionGuidance === undefined
+        ? base
+        : { ...(typeof base === "object" ? base : { strategy: base }), guidance: sessionGuidance };
+      if (sessionTeacher !== undefined) {
+        result = { ...(typeof result === "object" ? result : { strategy: result }), teacher: sessionTeacher };
+      }
+      return result;
+    };
     // 自定义预设：`custom:名字` 要保住名字（那是 presetDir 里的文件名）；
     // 会话级 prompt 是对象形态 `{ strategy: "custom", preset }`，也原样保留 ——
     // 否则"选了 prompt"会在下一次 load 时被归一成字符串丢掉。
@@ -189,6 +200,14 @@ function strategyMap(value) {
     out[key] = withGuidance(normalized.id);
   }
   return out;
+}
+
+/** 会话级教师开关：`null` = 跟随全局；对象只收 enabled（其余参数跟全局走）。 */
+function sessionTeacherValue(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (typeof value.enabled !== "boolean") return undefined;
+  return { enabled: value.enabled };
 }
 
 /** 会话级指导覆盖：`null` = 跟随全局；对象只收 enabled/mode。 */

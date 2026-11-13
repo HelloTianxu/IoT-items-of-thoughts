@@ -214,6 +214,14 @@ function strategyValue(value) {
  * @param {object|null} patch - 请求体里的映射表。
  * @returns {object} 校验后的完整表。
  */
+/** 会话级教师开关的归一化：只收 enabled，其余参数跟全局走。 */
+function sessionTeacherValue(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (typeof value.enabled !== "boolean") return undefined;
+  return { enabled: value.enabled };
+}
+
 /** 会话级指导覆盖的归一化：与 ConfigStore 里的同名逻辑保持一致。 */
 function sessionGuidanceValue(value) {
   if (value === null) return null;
@@ -235,13 +243,25 @@ function strategyTable(patch) {
     const guidance = value && typeof value === "object" && !Array.isArray(value) && "guidance" in value
       ? sessionGuidanceValue(value.guidance)
       : undefined;
+    const teacher = value && typeof value === "object" && !Array.isArray(value) && "teacher" in value
+      ? sessionTeacherValue(value.teacher)
+      : undefined;
     if (!entry) {
-      if (guidance !== undefined) out[key] = { guidance };
+      const extra = {};
+      if (guidance !== undefined) extra.guidance = guidance;
+      if (teacher !== undefined) extra.teacher = teacher;
+      if (Object.keys(extra).length) out[key] = extra;
       continue;
     }
-    const withGuidance = (base) => (guidance === undefined
-      ? base
-      : { ...(typeof base === "object" ? base : { strategy: base }), guidance });
+    const withGuidance = (base) => {
+      let result = guidance === undefined
+        ? base
+        : { ...(typeof base === "object" ? base : { strategy: base }), guidance };
+      if (teacher !== undefined) {
+        result = { ...(typeof result === "object" ? result : { strategy: result }), teacher };
+      }
+      return result;
+    };
     // 自定义预设要保住名字（那是 presetDir 里的文件名）：存成 `custom:名字`。
     if (entry.id === "custom") {
       if (entry.builtin) {
@@ -762,6 +782,10 @@ function doRegister(ctx, ws, store, deps = {}) {
             global: cfg.guidance ?? { enabled: false, mode: "external" },
             effective: effective.guidance ?? null,
           },
+          teacher: {
+            global: cfg.advisor?.teacher?.enabled === true,
+            effective: effective.teacher?.enabled === true,
+          },
           /** 它所属 preset 的映射（没配就是 null）。 */
           presetStrategy: agentPreset ? cfg.agentPresets?.[agentPreset] ?? null : null,
         });
@@ -807,8 +831,8 @@ function doRegister(ctx, ws, store, deps = {}) {
           return;
         }
         // 两个字段都不给 = 没有可改的东西。
-        if (strategyAbsent && payload.guidance === undefined) {
-          sendJson(res, 400, { error: "strategy or guidance is required" });
+        if (strategyAbsent && payload.guidance === undefined && payload.teacher === undefined) {
+          sendJson(res, 400, { error: "strategy, guidance or teacher is required" });
           return;
         }
         if (!cleared && !strategyAbsent && entry.builtin && !builtinPresetById(entry.builtin)) {
@@ -829,51 +853,57 @@ function doRegister(ctx, ws, store, deps = {}) {
             guidancePatch = Object.keys(nextGuidance).length ? nextGuidance : undefined;
           }
         }
-        const existing = sessions[sessionId];
-        const existingGuidance = existing && typeof existing === "object" && !Array.isArray(existing) ? existing.guidance : undefined;
-        // `null` = 回到"跟随 preset / 全局默认"，这正是"清除本会话覆盖"的语义。
-        // 但 `strategy` 缺省（只改指导）时不能走这条：档位必须原样保留。
-        if (strategyAbsent) {
-          const kept = entry ? null : existing && typeof existing === "object" && !Array.isArray(existing)
-            ? { ...existing }
-            : existing;
-          const base = kept && typeof kept === "object" ? { ...kept } : kept;
-          const nextGuidance = guidancePatch === undefined ? existingGuidance : guidancePatch;
-          let next;
-          if (base && typeof base === "object") {
-            next = { ...base };
-            if (nextGuidance === undefined || nextGuidance === null) delete next.guidance;
-            else next.guidance = nextGuidance;
-          } else if (typeof base === "string") {
-            next = nextGuidance === undefined || nextGuidance === null ? base : { strategy: base, guidance: nextGuidance };
-          } else {
-            next = nextGuidance === undefined || nextGuidance === null ? null : { guidance: nextGuidance };
-          }
-          if (next === null || (typeof next === "object" && Object.keys(next).length === 0)) delete sessions[sessionId];
-          else sessions[sessionId] = next;
-        } else if (!entry) {
-          // 清档位不等于清整条覆盖：指导是独立开关，除非显式传 guidance:null，
-          // 否则已有指导覆盖要留着。
-          const keptGuidance = guidancePatch === undefined ? existingGuidance : guidancePatch;
-          // null 与 undefined 都表示"跟随全局"：没有档位时整条覆盖没有意义。
-          if (keptGuidance === undefined || keptGuidance === null) delete sessions[sessionId];
-          else sessions[sessionId] = { guidance: keptGuidance };
-        } else {
-          const base = entry.id === "custom" && entry.builtin
-            ? { strategy: "custom", preset: `builtin:${entry.builtin}` }
-            : entry.id === "custom"
-              ? (entry.custom ? `custom:${entry.custom}` : "custom")
-              : entry.id;
-          const finalGuidance = guidancePatch === undefined ? existingGuidance : guidancePatch;
-          // 没有指导覆盖时保持旧形态（字符串 / custom 对象），避免把整张表都改成对象。
-          if (finalGuidance === undefined && typeof base === "string") {
-            sessions[sessionId] = base;
-          } else {
-            const merged = typeof base === "object" ? { ...base } : { strategy: base };
-            if (finalGuidance !== undefined) merged.guidance = finalGuidance;
-            sessions[sessionId] = merged;
+        // 会话级教师开关：与指导覆盖同样独立（null = 跟随全局，不传 = 保持原值）。
+        const hasTeacher = payload.teacher !== undefined;
+        let teacherPatch;
+        if (hasTeacher) {
+          if (payload.teacher === null) teacherPatch = null;
+          else if (payload.teacher && typeof payload.teacher === "object" && !Array.isArray(payload.teacher)) {
+            if (typeof payload.teacher.enabled === "boolean") teacherPatch = { enabled: payload.teacher.enabled };
           }
         }
+        const existing = sessions[sessionId];
+        const existingGuidance = existing && typeof existing === "object" && !Array.isArray(existing) ? existing.guidance : undefined;
+        const existingTeacher = existing && typeof existing === "object" && !Array.isArray(existing) ? existing.teacher : undefined;
+        // 三部分（档位 / 指导 / 教师）各自独立：`null` = 清除并跟随全局，
+        // 缺省 = 保留原值。合成一条覆盖再落盘，避免三套 if-else 各漏一处。
+        const keepStrategy = strategyAbsent
+          ? (existing && typeof existing === "object" && !Array.isArray(existing)
+              ? (existing.strategy !== undefined
+                  ? existing
+                  : existing.preset !== undefined ? { strategy: "custom", preset: existing.preset } : null)
+              : existing ?? null)
+          : cleared
+            ? null
+            : entry
+              ? entry.id === "custom" && entry.builtin
+                ? { strategy: "custom", preset: `builtin:${entry.builtin}` }
+                : entry.id === "custom"
+                  ? (entry.custom ? `custom:${entry.custom}` : "custom")
+                  : entry.id
+              : null;
+        const nextGuidance = guidancePatch === undefined ? existingGuidance : guidancePatch;
+        const nextTeacher = teacherPatch === undefined ? existingTeacher : teacherPatch;
+
+        let merged;
+        if (keepStrategy && typeof keepStrategy === "object") {
+          merged = { ...keepStrategy };
+        } else if (typeof keepStrategy === "string") {
+          merged = { strategy: keepStrategy };
+        } else {
+          merged = {};
+        }
+        if (nextGuidance === undefined || nextGuidance === null) delete merged.guidance;
+        else merged.guidance = nextGuidance;
+        if (nextTeacher === undefined || nextTeacher === null) delete merged.teacher;
+        else merged.teacher = nextTeacher;
+
+        const hasStrategy = merged.strategy !== undefined;
+        const hasExtra = merged.guidance !== undefined || merged.teacher !== undefined;
+        if (!hasStrategy && !hasExtra) delete sessions[sessionId];
+        // 没有额外覆盖时保持旧形态（字符串），避免把整张表都改成对象。
+        else if (!hasExtra && typeof keepStrategy === "string") sessions[sessionId] = keepStrategy;
+        else sessions[sessionId] = merged;
         store.save({ sessions });
         // 前端不一定传 preset；查不到就当"少一层映射"，不影响会话覆盖生效。
         const preset = payload.agentPreset ?? agentPresetOf(ctx, sessionId);

@@ -62,6 +62,7 @@ import { switchSessionStrategy } from "./lib/switch.mjs";
 import { buildCustomPrompt, listPresets, readPreset, resolvePresetDir, writePreset } from "./lib/custom.mjs";
 import {
   ASK_KINDS,
+  adviceMuted,
   buildTeacherPrompt,
   canConsult,
   consultTeacher,
@@ -1872,6 +1873,72 @@ await check("改写调用超时必须返回：不响应 abort 的流也要保留
   assert.equal(result, null, "超时要返回 null（保留原文）");
   assert.ok(elapsed < 3000, "应在超时附近返回（实际 " + elapsed + "ms）");
   assert.ok(events.some((entry) => entry.event === "thinking-failed" && entry.code === "REWRITE_TIMEOUT"));
+});
+
+await check("教师互斥：咨询过的那一轮不再触发外部建议", () => {
+  resetTeacherState();
+  const limits = { cooldownBlocks: 3 };
+  noteBlock("s1");
+  assert.equal(adviceMuted("s1"), false, "没咨询过时不互斥");
+  markConsulted("s1", limits);
+  assert.equal(adviceMuted("s1"), true, "咨询后同一轮互斥");
+  noteBlock("s1");
+  assert.equal(adviceMuted("s1"), true, "紧接着的下一块也互斥");
+  noteBlock("s1");
+  assert.equal(adviceMuted("s1"), false, "再往后恢复");
+  resetTeacherState();
+});
+
+await check("教师会话覆盖：全局没开时，会话可以单独打开", () => {
+  const global = resolveConfig({ strategy: "iot-full", advisor: { teacher: { enabled: false } } }, { sessionId: "s" });
+  assert.equal(global.teacher.enabled, false);
+
+  const on = resolveConfig({
+    strategy: "iot-full",
+    advisor: { teacher: { enabled: false, cooldownBlocks: 5 } },
+    sessions: { s: { teacher: { enabled: true } } },
+  }, { sessionId: "s" });
+  assert.equal(on.teacher.enabled, true, "会话能覆盖全局开关");
+  assert.equal(on.teacher.cooldownBlocks, 5, "参数仍走全局，不被会话复制");
+
+  const off = resolveConfig({
+    strategy: "iot-full",
+    advisor: { teacher: { enabled: true } },
+    sessions: { s: { teacher: { enabled: false } } },
+  }, { sessionId: "s" });
+  assert.equal(off.teacher.enabled, false, "会话也能关掉全局开启");
+
+  const follow = resolveConfig({
+    strategy: "iot-full",
+    advisor: { teacher: { enabled: true } },
+    sessions: { s: { teacher: null } },
+  }, { sessionId: "s" });
+  assert.equal(follow.teacher.enabled, true, "null 跟随全局");
+});
+
+await check("session API：教师开关与档位分开落盘，只改教师不清档位", async () => {
+  const ws = fakeWebServer();
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "iot-session-teacher-")), "config.json"));
+  store.save({ sessions: { s1: { strategy: "iot-full" } } });
+  registerConfigApi(testCtx(ws), store, { rewrite: async () => "x", getRoute: () => ({ provider: "p", model: "m" }) });
+
+  const on = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s1", teacher: { enabled: true } }),
+  });
+  assert.equal(on.statusCode, 200, "只改教师不该报错：" + JSON.stringify(on.payload));
+  assert.deepEqual(on.payload.override, { strategy: "iot-full", teacher: { enabled: true } }, "档位必须保留");
+
+  const get = await ws.call("/iot-thinking/api/session", { url: "/iot-thinking/api/session?sessionId=s1" });
+  assert.equal(get.payload.teacher.global, false);
+  assert.equal(get.payload.teacher.effective, true, "会话开关要生效");
+
+  // 显式 null：回到跟随全局。
+  const reset = await ws.call("/iot-thinking/api/session", {
+    method: "PUT",
+    body: JSON.stringify({ sessionId: "s1", teacher: null }),
+  });
+  assert.deepEqual(reset.payload.override, { strategy: "iot-full" }, "清教师覆盖但保留档位");
 });
 
 await check("教师冷却：调用后进入 CD，按块递减，冷却中拒绝调用", () => {

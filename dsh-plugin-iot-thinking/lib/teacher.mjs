@@ -114,7 +114,19 @@ export function markConsulted(sessionId, limits = TEACHER_LIMITS) {
   state.calls += 1;
   state.availableAt = state.blocks + Math.max(0, Math.floor(limits.cooldownBlocks));
   state.lastOutcome = "ok";
+  // 互斥：这一轮已经问过教师了，同一轮（以及紧接着的下一块）不再触发外部建议 ——
+  // 一次咨询就是一次对话，没必要在同一轮里再打一次强模型。
+  state.mutexUntil = state.blocks + 1;
   return teacherStatus(sessionId, limits);
+}
+
+/**
+ * 互斥判定：刚咨询过教师的那一轮不再追加外部建议。
+ * 返回 true 表示本次建议应当跳过（记 advisor-skipped: teacher-consulted）。
+ */
+export function adviceMuted(sessionId) {
+  const state = stateOf(sessionId);
+  return typeof state.mutexUntil === "number" && state.blocks <= state.mutexUntil;
 }
 
 /** 调用前校验：冷却中直接拒绝（tool 的硬约束，不只是提示）。 */
@@ -141,9 +153,13 @@ function textOf(message) {
 }
 
 /**
- * 从会话里抽取最近 `depth` 轮（用户消息 + 助手结论）。
+ * 从会话里抽取最近 `depth` 轮（用户消息 + 助手**正文**）。
  *
- * 只取**正文**：工具调用细节与思考过程只保留摘要 —— 它们是最贵、也最不必要给咨询者的部分。
+ * 为什么只要正文：thinking 是"为了产出正文"服务的中间产物，而教师要看的是任务
+ * 的真实状态 —— 上一轮到底交付了什么、用户提了什么要求。assistant message 里
+ * 只有正文（reasoning 是流里的块，不进 message），所以这里天然不会带上思考过程。
+ * 工具调用细节同理：`textOf` 只收 text/input_text 块。
+ *
  * 拿不到会话（非 web 组合/接口变化）时返回空数组，调用方降级为"只有当前进展"。
  */
 export function extractSessionContext(session, depth) {

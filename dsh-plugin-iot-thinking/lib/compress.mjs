@@ -20,6 +20,7 @@ import {
 import { DEFAULT_STRATEGY, limitsOf, strategyById } from "./strategies.mjs";
 import { hasLabel, hasThinkTag } from "./gates.mjs";
 import { ADVISOR_LIMITS, advise, appendAdvice, buildAdvisorPrompt, formatAdvice, resolveAdvisorRoute } from "./advisor.mjs";
+import { adviceMuted } from "./teacher.mjs";
 import { isOffloaded, normalizeRouteTarget, resolveRewriteRoute } from "./route.mjs";
 
 /** 改写结果 + 账本载荷。是否真的替换由 stream.mjs 判定后写进 replaced。 */
@@ -480,6 +481,11 @@ export async function compressThinking({ Llm, ctx, text, options, cfg, index, ex
     // 外部指导模式：并发调用强模型。内置指导模式由提示词负责，不发第二路。
     if (guidance.mode !== "external") {
       mark("advisor-skipped", { index, strategy: strategy.id, reason: "builtin-mode" });
+      return null;
+    }
+    // 互斥：这一轮已经咨询过教师，就不再追加外部建议（一次咨询就是一次对话）。
+    if (adviceMuted(options?.sessionId)) {
+      mark("advisor-skipped", { index, strategy: strategy.id, reason: "teacher-consulted" });
       return null;
     }
     const advisorRoute = resolveAdvisorRoute(cfg, strategy.id, sessionRoute);

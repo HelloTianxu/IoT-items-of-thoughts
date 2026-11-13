@@ -201,12 +201,26 @@ export function resolveConfig(cfg, who = {}) {
   }
   if (base.noThink !== false) limits.noThink = true;
 
+  // 教师咨询：全局默认 + 会话覆盖（null = 跟随全局）。会话只能改 enabled，
+  // 冷却/深度/预算仍走全局，避免每个会话都复制一份参数。
+  const globalTeacher = base.advisor?.teacher && typeof base.advisor.teacher === "object" ? base.advisor.teacher : null;
+  const sessionTeacher = sessionGuidance && typeof sessionGuidance === "object" && !Array.isArray(sessionGuidance)
+    ? sessionGuidance.teacher
+    : undefined;
+  const teacherEnabled = sessionTeacher === null || sessionTeacher === undefined
+    ? globalTeacher?.enabled === true
+    : typeof sessionTeacher.enabled === "boolean"
+      ? sessionTeacher.enabled
+      : globalTeacher?.enabled === true;
+  const teacher = { ...(globalTeacher ?? {}), enabled: teacherEnabled };
+
   const off = strategy?.family === "off";
   return {
     ...base,
     strategy: route.id,
     route,
     guidance,
+    teacher,
     limits,
     minChars: Number.isFinite(limits.minChars) ? Math.max(0, limits.minChars) : 0,
     maxChars: Number.isFinite(limits.maxChars) ? Math.max(1, limits.maxChars) : 24000,
