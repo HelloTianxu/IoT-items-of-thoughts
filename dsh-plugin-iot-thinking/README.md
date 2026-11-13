@@ -172,6 +172,7 @@ sessions: {
 "guidance": { "enabled": true, "mode": "external" },
 "advisor": {
   "route": { "provider": "strong-provider", "model": "strong-model" },
+  "effort": "auto",
   "maxAdvice": 3,
   "maxChars": 600,
   "timeoutMs": 30000
@@ -189,6 +190,10 @@ sessions: {
 - `guidance: null` = 跟随全局；
 - 只写 `enabled` 时模式继承全局；
 - 清除档位不会清掉指导覆盖，除非显式传 `guidance: null`。
+
+**指导模型与档位**：设置卡按 provider 拉该路由的模型清单与真实档位，从列表里选。
+`advisor.effort` 与压缩器同语义：`auto` 先试 `off`，被拒就探这个路由公开的最低档，
+再被拒就不发该字段，并把结论按 route+mode 记住；显式档位被拒时不擅自换档。
 
 **自测**：设置卡可以点名测「内置指导」或「外部指导」，返回的报文日志（trace）包含每次调用
 实际发出的提示词、原始输出、finish 与 usage，便于比对两路行为。
