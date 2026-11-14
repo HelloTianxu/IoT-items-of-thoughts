@@ -124,6 +124,34 @@ assert.equal((await run()).ok, false); assert.equal(teacherStatus("other").calls
 assert.equal((await run("other")).ok, true);
 console.log("ok: hot maxTokens/inputBudget/depth/cooldown budgets and session-isolated cooldown");
 resetTeacherState();
+save({ enabled: true, advisor: { route: { provider: null, model: null }, teacher: { enabled: true, cooldownBlocks: 0 } }, sessions: { a: { teacher: { enabled: true } }, b: { teacher: { enabled: true } } } });
+const remember = async (sessionId, provider, model) => {
+  const output = streamHook({ purpose: "agent-loop", sessionId, provider, model }, () => (async function* () {})());
+  for await (const _ of output) {}
+};
+await remember("a", "provider-a", "model-a");
+await remember("b", "provider-b", "model-b");
+assert.equal((await run("a")).ok, true);
+assert.equal(calls.at(-1).provider, "provider-a", "教师 fallback 路由必须按 session 隔离");
+assert.equal(calls.at(-1).model, "model-a");
+resetTeacherState();
+mode = "wait"; closed = false;
+const concurrentAbort = new AbortController();
+const firstConcurrent = run("a", concurrentAbort.signal);
+await new Promise((resolve) => setImmediate(resolve));
+const callCountDuringFirst = calls.length;
+const secondConcurrent = await run("a");
+assert.equal(secondConcurrent.ok, false);
+assert.match(secondConcurrent.reason, /正在进行/);
+assert.equal(calls.length, callCountDuringFirst, "并发拒绝不能再发模型请求");
+concurrentAbort.abort(new Error("end concurrent test"));
+await assert.rejects(firstConcurrent, /end concurrent test/);
+await new Promise((resolve) => setImmediate(resolve));
+mode = "success";
+assert.equal((await run("a")).ok, true, "失败/取消后预约必须释放");
+console.log("ok: teacher route is session-scoped; concurrent consult is rejected and cancellation releases reservation");
+
+resetTeacherState();
 const aborted = new AbortController(); aborted.abort(new Error("already cancelled"));
 const count = calls.length; await assert.rejects(run("a", aborted.signal), /already cancelled/); assert.equal(calls.length, count);
 stable();

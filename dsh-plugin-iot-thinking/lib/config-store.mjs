@@ -145,15 +145,21 @@ export function defaultConfigPath() {
 
 function readJson(path) {
   if (!existsSync(path)) return null;
+  let text;
   try {
-    let text = readFileSync(path, "utf8");
-    // Windows PowerShell's `Set-Content -Encoding utf8` writes a BOM. JSON.parse
-    // rejects it, which used to fall back to DEFAULTS and silently overwrite the
-    // user's profile with `full`. Strip the BOM before parsing.
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    text = readFileSync(path, "utf8");
+  } catch (cause) {
+    if (cause?.code === "ENOENT") return null;
+    throw Object.assign(new Error(`无法读取 IoT 配置，已保留原文件：${path}`, { cause }), { code: "CONFIG_READ_FAILED", path });
+  }
+  // Windows PowerShell's `Set-Content -Encoding utf8` writes a BOM. JSON.parse
+  // rejects it, which used to fall back to DEFAULTS and silently overwrite the
+  // user's profile with `full`. Strip the BOM before parsing.
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  try {
     return JSON.parse(text);
-  } catch {
-    return null;
+  } catch (cause) {
+    throw Object.assign(new Error(`IoT 配置不是合法 JSON，已保留原文件：${path}`, { cause }), { code: "CONFIG_PARSE_FAILED", path });
   }
 }
 
@@ -368,6 +374,7 @@ export class ConfigStore {
     this.rowDefaults = merge(DEFAULTS, rowConfig);
     this._cache = null;
     this._mtimeMs = null;
+    this.lastError = null;
     /** @type {{from: string, to: string}|null} 最近一次迁移的记录，账本要能查到。 */
     this.migrated = null;
   }
@@ -377,7 +384,24 @@ export class ConfigStore {
     const mtime = stat ? stat.mtimeMs : null;
     if (this._cache !== null && mtime === this._mtimeMs) return this._cache;
 
-    const raw = readJson(this.path);
+    let raw;
+    try {
+      raw = readJson(this.path);
+      this.lastError = null;
+    } catch (error) {
+      // A half-written or unreadable config must never mean "first install". Keep
+      // the last known-good value; on cold start fail closed without touching the
+      // user's bytes. A later mtime change retries the read automatically.
+      this.lastError = error;
+      if (this._cache !== null) {
+        this._mtimeMs = mtime;
+        return this._cache;
+      }
+      const safe = merge(this.rowDefaults, { enabled: false });
+      this._cache = safe;
+      this._mtimeMs = mtime;
+      return safe;
+    }
     // 旧文件 → 新形状。迁移只在"文件里有旧 `profile`、却没有新 `strategy`"时发生，
     // 且立刻落盘：否则每次 load 都要重算，而 user 在设置卡里存的任何值都会覆盖它。
     const strategyMigrated = raw === null ? null : migrateLegacyConfig(raw);
@@ -398,6 +422,7 @@ export class ConfigStore {
   }
 
   save(next) {
+    if (this.lastError && existsSync(this.path)) throw this.lastError;
     const current = this._cache ?? readJson(this.path) ?? this.rowDefaults;
     const overlay = { ...current, ...(next || {}) };
     // rewrite 是嵌套块：增量写入（只改 model / 只改 fallback）必须和当前值合并，
@@ -415,6 +440,7 @@ export class ConfigStore {
         ...current.advisor,
         ...next.advisor,
         route: { ...(current.advisor.route ?? {}), ...(next.advisor.route ?? {}) },
+        teacher: { ...(current.advisor.teacher ?? {}), ...(next.advisor.teacher ?? {}) },
       };
     }
     const merged = merge(this.rowDefaults, overlay);

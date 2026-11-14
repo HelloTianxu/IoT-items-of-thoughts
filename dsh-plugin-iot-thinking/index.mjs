@@ -20,9 +20,12 @@ import {
   buildTeacherPrompt,
   normalizeTeacherLimits,
   canConsult,
+  clearTeacherState,
   consultTeacher,
   extractSessionContext,
   markConsulted,
+  releaseConsult,
+  reserveConsult,
   sessionIdOf,
   sessionOf,
   teacherStatus,
@@ -71,8 +74,10 @@ export function apply(ctx, config = {}) {
   const sessionArchive = createArchiveRuntime(ctx, { getConfig: () => store.load(), mark });
   if (config.sessionMemory !== false) registerSessionMemory(ctx, { defineTool, runtime: sessionArchive, getConfig: () => store.load() });
 
-  // 自测没有请求可跟随，记住最近一次 agent-loop 请求的路由。
+  // Routes are session-scoped: a request in session B must never choose the
+  // teacher/rewrite fallback route for session A.
   const lastRoute = { provider: null, model: null };
+  const routesBySession = new Map();
   const rememberRoute = (options) => {
     if (!options || typeof options !== "object") return;
     try {
@@ -80,8 +85,13 @@ export function apply(ctx, config = {}) {
     } catch {
       return;
     }
-    lastRoute.provider = typeof options.provider === "string" ? options.provider : null;
-    lastRoute.model = typeof options.model === "string" ? options.model : null;
+    const route = {
+      provider: typeof options.provider === "string" ? options.provider : null,
+      model: typeof options.model === "string" ? options.model : null,
+    };
+    lastRoute.provider = route.provider;
+    lastRoute.model = route.model;
+    if (options.sessionId !== undefined && options.sessionId !== null) routesBySession.set(String(options.sessionId), route);
   };
 
   const shouldTransform = (options) => {
@@ -218,11 +228,17 @@ export function apply(ctx, config = {}) {
         // 冷却闸门是**硬约束**：不只是提示，冷却中直接拒绝。
         if (!canConsult(sessionId)) {
           const status = teacherStatus(sessionId, limits);
-          return { ok: false, reason: `教师冷却中（还需 ${status.remainingBlocks} 块）`, available: false, remainingBlocks: status.remainingBlocks };
+          return { ok: false, reason: status.available ? "教师咨询正在进行" : `教师冷却中（还需 ${status.remainingBlocks} 块）`, available: false, remainingBlocks: status.remainingBlocks };
         }
-        const route = resolveAdvisorRoute(cfg, resolved.strategy, lastRoute);
+        const sessionRoute = routesBySession.get(String(sessionId));
+        const route = resolveAdvisorRoute(cfg, resolved.strategy, sessionRoute ?? { provider: null, model: null });
         if (!route?.provider || !route?.model) {
           return { ok: false, reason: "没有可用的教师路由：在设置卡里指定建议模型，或先在本会话发一条消息" };
+        }
+        const reservation = reserveConsult(sessionId);
+        if (reservation === null) {
+          const status = teacherStatus(sessionId, limits);
+          return { ok: false, reason: status.available ? "教师咨询正在进行" : `教师冷却中（还需 ${status.remainingBlocks} 块）`, available: false, remainingBlocks: status.remainingBlocks };
         }
         const depth = Math.max(limits.minDepth, Math.min(limits.maxDepth, Math.floor(Number(args.depth) || limits.minDepth)));
         const session = sessionOf(ctx, sessionId);
@@ -238,23 +254,30 @@ export function apply(ctx, config = {}) {
           ask: args.ask,
           limits,
         });
-        const result = await consultTeacher({
-          ctx,
-          Llm,
-          route,
-          prompt,
-          options: { sessionId, signal: exec?.signal },
-          timeoutMs: Math.max(3000, Math.min(120000, Number(teacher.timeoutMs) || 30000)),
-          maxTokens: limits.maxTokens,
-          effort: cfg.advisor?.effort,
-          temperature: cfg.advisor?.temperature,
-        });
-        exec?.signal?.throwIfAborted();
+        let result;
+        try {
+          result = await consultTeacher({
+            ctx,
+            Llm,
+            route,
+            prompt,
+            options: { sessionId, signal: exec?.signal },
+            timeoutMs: Math.max(3000, Math.min(120000, Number(teacher.timeoutMs) || 30000)),
+            maxTokens: limits.maxTokens,
+            effort: cfg.advisor?.effort,
+            temperature: cfg.advisor?.temperature,
+          });
+          exec?.signal?.throwIfAborted();
+        } catch (error) {
+          releaseConsult(sessionId, reservation);
+          throw error;
+        }
         if (!result.ok) {
+          releaseConsult(sessionId, reservation);
           mark("teacher-failed", { sessionId, provider: route.provider, model: route.model, code: result.code, message: result.error, depth, rounds: rounds.length });
           return { ok: false, reason: result.error, provider: route.provider, model: route.model };
         }
-        const status = markConsulted(sessionId, limits);
+        const status = markConsulted(sessionId, limits, reservation);
         mark("teacher-consulted", {
           sessionId,
           provider: route.provider,
@@ -279,6 +302,13 @@ export function apply(ctx, config = {}) {
       },
     });
   };
+
+  ctx.on("session/disposed", (session) => {
+    const id = String(session?.id ?? "unknown");
+    recentBySession.delete(id);
+    routesBySession.delete(id);
+    clearTeacherState(id);
+  });
 
   ctx.inject(["tools"], (toolCtx) => {
     // 保持工具声明稳定，避免会话开关改变 prompt 前缀；未启用由 execute 本地立即拒绝。

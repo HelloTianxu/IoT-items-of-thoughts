@@ -98,7 +98,7 @@ function stateOf(sessionId) {
   const key = String(sessionId ?? "unknown");
   const current = TEACHER_STATE.get(key);
   if (current) return current;
-  const fresh = { blocks: 0, availableAt: 0, calls: 0, lastOutcome: null };
+  const fresh = { blocks: 0, availableAt: 0, calls: 0, lastOutcome: null, reservation: null, disposed: false };
   TEACHER_STATE.set(key, fresh);
   return fresh;
 }
@@ -132,8 +132,14 @@ export function formatTeacherStatus(status, limits = TEACHER_LIMITS) {
 /**
  * 调用成功后进入冷却。失败/超时**不**进冷却：一次没生效的咨询不该让模型付出冷却代价。
  */
-export function markConsulted(sessionId, limits = TEACHER_LIMITS) {
+export function markConsulted(sessionId, limits = TEACHER_LIMITS, reservation = null) {
   const state = stateOf(sessionId);
+  if (reservation !== null && state.reservation !== reservation) return teacherStatus(sessionId, limits);
+  state.reservation = null;
+  if (state.disposed) {
+    TEACHER_STATE.delete(String(sessionId ?? "unknown"));
+    return { available: false, remainingBlocks: 0, calls: state.calls };
+  }
   state.calls += 1;
   state.availableAt = state.blocks + Math.max(0, Math.floor(limits.cooldownBlocks));
   state.lastOutcome = "ok";
@@ -154,8 +160,35 @@ export function adviceMuted(sessionId) {
 
 /** 调用前校验：冷却中直接拒绝（tool 的硬约束，不只是提示）。 */
 export function canConsult(sessionId) {
+  const state = stateOf(sessionId);
   const status = teacherStatus(sessionId);
-  return status.available;
+  return status.available && state.reservation === null;
+}
+
+/** Atomically reserve one consultation slot for this session. */
+export function reserveConsult(sessionId) {
+  const state = stateOf(sessionId);
+  if (!teacherStatus(sessionId).available || state.reservation !== null) return null;
+  const token = Symbol(String(sessionId ?? "unknown"));
+  state.reservation = token;
+  return token;
+}
+
+/** Release a failed/cancelled reservation without entering cooldown. */
+export function releaseConsult(sessionId, token) {
+  const key = String(sessionId ?? "unknown");
+  const state = TEACHER_STATE.get(key);
+  if (!state || state.reservation !== token) return;
+  state.reservation = null;
+  if (state.disposed) TEACHER_STATE.delete(key);
+}
+
+export function clearTeacherState(sessionId) {
+  const key = String(sessionId ?? "unknown");
+  const state = TEACHER_STATE.get(key);
+  if (!state) return;
+  if (state.reservation !== null) state.disposed = true;
+  else TEACHER_STATE.delete(key);
 }
 
 export function resetTeacherState() {
@@ -210,7 +243,9 @@ export function extractSessionContext(session, depth) {
     const text = textOf(message);
     if (!text) continue;
     if (message.role === "assistant") {
-      pendingAssistant = text;
+      // Reverse scan sees the final assistant message first. Keep that newest body;
+      // intermediate/tool-stage assistant messages must not overwrite it.
+      if (!pendingAssistant) pendingAssistant = text;
       continue;
     }
     rounds.push({ user: text, assistant: pendingAssistant });

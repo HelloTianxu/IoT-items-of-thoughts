@@ -30,7 +30,7 @@ sessions[<sessionId>]  >  agentPresets[<agent preset id>]  >  strategy（全局�
 
 `iot_session_memory` 提供状态总览/关键记忆的读写、检索、带revision的修改与逻辑删除；`iot_session_log` 提供原始轮次list/search/read。随包的 [iot-session-memory Skill](skills/iot-session-memory/SKILL.md) 通过宿主 skills 注册，教模型先读记忆、不足再读Log。记忆删除不删除日志或历史修订。
 
-完整设计、目录与局限见仓库 [Session 归档与分层记忆](../docs/session-memory.md)。测试：`npm run test:archive`；当前Desktop隔离集成测试：`ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" session-host-test.mjs`。尚未自动部署或验证真实长任务召回效果。
+完整设计、目录、批量持久化语义与局限见仓库 [Session 归档与分层记忆](../docs/session-memory.md)。测试：`npm run test:archive`；当前Desktop隔离集成测试：`ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" session-host-test.mjs`。真实DGX原思/处理/增强归档已验证；自然自主召回准确率、Windows和长期磁盘压力仍未完成。
 
 ## 它修的是什么
 
@@ -286,11 +286,9 @@ iot_consult_teacher(depth, ask, goal, progress)
 {"ask":"review","depth":3,"goal":"检查迁移方案","progress":"已完成设计，尚未执行"}
 ```
 
-注入文本使用 `interpolate:false`；上下文回调不调用模型、不遍历历史。
-读取配置异常时不阻断组装，错误诊断每次注册最多记录一次。
+注入文本使用 `interpolate:false`；上下文回调不调用模型、不遍历历史。2026-11-13 曾怀疑上下文注册导致卡死，但真实 Cordis/SystemPrompt 隔离测试未复现，不能把相关性写成根因；后续确认的本地长卡顿来自 Session 历史归档逐事件锁与 fsync，已改为批量归档。运行时上下文现已恢复，并由入口、纯逻辑及真实宿主契约测试覆盖。读取配置异常时上下文 fail-open；配置存储本身会保留损坏原文件，热更新使用最近一次有效配置，冷启动则关闭插件，绝不以默认启用配置覆盖用户字节。
 
-CD 按**块**计量，只暴露冷却、不暴露总额（避免"不用白不用"的心理）。失败与超时**不进**冷却——
-一次没生效的咨询不该让模型付出代价。
+CD 按**块**计量，只暴露冷却、不暴露总额（避免"不用白不用"的心理）。同一会话同时只能有一次教师咨询；并发调用在本地拒绝，不会重复请求模型。失败、取消与超时会释放预约且**不进**冷却——一次没生效的咨询不该让模型付出代价。教师跟随会话路由时按 session 隔离，绝不借用另一会话最近的 provider/model；会话释放时同步清理路由、冷却和最近结果状态。
 
 ```jsonc
 "advisor": {
@@ -548,9 +546,7 @@ $env:IOT_DSH_SEAM_ANCHORS = "<DSH_HOME>/dsh-<ver>/node_modules"
 7. **HTTP 路由自带门禁**：要求自定义头 `x-iot-thinking: 1`、只收同源文档、默认只接受
    loopback 对端。把 web 绑到 `0.0.0.0` 时设置卡默认会被 403 拒绝；要恢复就设
    `IOT_THINKING_ALLOW_REMOTE=1`，并把"谁能访问这个端口"当成安全边界来管理。
-8. **Electron 打包版（`app.asar`）不支持**：host 半个要从盘上找宿主的 `@deepseek-ai/dsh-llm`
-   （见 `lib/seams.mjs`），打包版把它放在归档里，外部进程看不见。现象是能聊天、能出答案，
-   只有 stderr 一行 `warning: 1 entry did not activate`，账本里没有 `constructed`。
+8. **宿主 seam 必须可解析**：源码安装、版本化安装与 Electron/ASAR 宿主的解析锚点不同；运行宿主可正常加载链接插件，但独立 Node smoke 若找不到盘上的 `@deepseek-ai/dsh-llm`，需设置 `IOT_DSH_SEAM_ANCHORS` 或改用 `DSH_NODE_EXECUTABLE` 做宿主契约测试。独立 smoke 失败不能直接推断运行中的插件未激活。
 9. **装完先看账本，别信"装上了"**：只有 `events.jsonl` 里出现 `constructed`，
    才说明这条 entry 真的激活了。
 

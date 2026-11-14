@@ -47,7 +47,7 @@
 
 | 形态 | 目录 | 状态 |
 |---|---|---|
-| **运行时 thinking 改写插件**（主形态） | [`dsh-plugin-iot-thinking/`](dsh-plugin-iot-thinking/) | **在用**（v0.2）。挂在 DSH 的 `llm/stream` waterfall 上：块开始时放行、reasoning 增量先扣住、块结束时按档位改写、回一个 `reasoning-delta` + 改写的 `block-end`。**不 provide `ctx.compaction`**，所以没有 checkpoint 消息、没有"上下文已压缩"块，preset 会话里同样生效 |
+| **运行时 thinking 改写插件**（主形态） | [`dsh-plugin-iot-thinking/`](dsh-plugin-iot-thinking/) | **在用**（v0.3）。挂在 DSH 的 `llm/stream` waterfall 上：块开始时放行、reasoning 增量先扣住、块结束时按档位改写、回一个 `reasoning-delta` + 改写的 `block-end`。**不 provide `ctx.compaction`**，所以没有 checkpoint 消息、没有"上下文已压缩"块，preset 会话里同样生效 |
 | 角色档的一种写法（示例预设） | [`../inner-voice/`](../inner-voice/) | 不是插件、不是内置档位。仓库里留着它的**实现基线**与一份可直接用的预设文本 [`presets/character-inner-voice.md`](../inner-voice/presets/character-inner-voice.md)；删掉内置 `voice` 档时一并写明了代价（没有 tic / collapse / bans 闸门） |
 | 内置 compaction 形态 | [`dsh-plugin-compaction/`](dsh-plugin-compaction/) | **已退役**（2026-10-18）。走 `ctx.compaction`，会把一段历史换成 checkpoint 消息，模型读到后当成新指令重新定位。留作历史与回滚参考 |
 | pciso 实验平台（前身） | `src/pciso/`、`configs/`、`prefixes/`、`scripts/`、`tests/` | 保留、测试仍在跑（见 [`docs/pciso-platform.md`](docs/pciso-platform.md)）。它是**实验台**：离线可复现、可回放、可故障注入，用来量"约束违反数随轮数"与"prompt 成本" |
@@ -146,7 +146,7 @@ $DSH_HOME/plugin-data/iot-thinking/originals/<sid>/<time>-block<index>.txt   # �
 
 新增自动逐轮 Log（原始 thinking、IoT 处理与增强、正文和工具事件）、Session 记忆 CRUD/检索工具以及 `iot-session-memory` Skill。先读记忆总览，细节不足再查原始轮次；不接管 compaction，不在每块后追加长链接。
 
-配置、目录、测试与已知边界统一见 [会话归档与记忆说明](docs/session-memory.md)。当前为仓库实现，未因此自动部署到运行 profile。
+配置、目录、批量归档语义、测试与已知边界统一见 [会话归档与记忆说明](docs/session-memory.md)。本机链接 profile 已验证真实 DGX 原思/处理/增强归档；自然自主召回、Windows与长期磁盘压力仍是边界。
 
 ## 文档
 

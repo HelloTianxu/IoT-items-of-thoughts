@@ -65,12 +65,15 @@ import {
   adviceMuted,
   buildTeacherPrompt,
   canConsult,
+  clearTeacherState,
   consultTeacher,
   extractSessionContext,
   formatTeacherStatus,
   normalizeTeacherLimits,
   markConsulted,
   noteBlock,
+  releaseConsult,
+  reserveConsult,
   resetTeacherState,
   teacherStatus,
 } from "./lib/teacher.mjs";
@@ -2132,6 +2135,32 @@ await check("session API：教师开关与档位分开落盘，只改教师不�
   assert.deepEqual(reset.payload.override, { strategy: "iot-full" }, "清教师覆盖但保留档位");
 });
 
+await check("教师咨询预约是会话内原子的，失败释放且 dispose 可清理", () => {
+  resetTeacherState();
+  const first = reserveConsult("race");
+  assert.ok(first, "第一次预约成功");
+  assert.equal(reserveConsult("race"), null, "同会话并发预约必须拒绝");
+  assert.equal(canConsult("race"), false);
+  releaseConsult("race", first);
+  assert.equal(canConsult("race"), true, "失败释放后立即恢复");
+  const second = reserveConsult("race");
+  markConsulted("race", { cooldownBlocks: 3 }, second);
+  assert.equal(teacherStatus("race").calls, 1);
+  clearTeacherState("race");
+  assert.deepEqual(teacherStatus("race"), { available: true, remainingBlocks: 0, calls: 0 });
+  resetTeacherState();
+});
+
+await check("教师上下文同轮多个 assistant 只取最终正文", () => {
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "需求" }] },
+    { role: "assistant", content: [{ type: "text", text: "中间结果" }] },
+    { role: "assistant", content: [{ type: "text", text: "最终正文" }] },
+  ];
+  const session = { log: messages, surface: { deriveEventMessage: (event) => event } };
+  assert.deepEqual(extractSessionContext(session, 1), [{ user: "需求", assistant: "最终正文" }]);
+});
+
 await check("教师冷却：调用后进入 CD，按块递减，冷却中拒绝调用", () => {
   resetTeacherState();
   const limits = { cooldownBlocks: 3, minDepth: 1, maxDepth: 5 };
@@ -3595,6 +3624,23 @@ await check("session API：GET 说明解析来源，PUT 写覆盖并可清回跟
   assert.equal(bad.statusCode, 400);
   const noId = await ws.call("/iot-thinking/api/session", { method: "PUT", body: JSON.stringify({ strategy: "iot-full" }) });
   assert.equal(noId.statusCode, 400);
+});
+
+await check("配置损坏保留原字节、冷启动关闭、恢复后重读，教师增量保存不重置预算", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "iot-config-corrupt-"));
+  const file = join(dir, "config.json");
+  const broken = '{"enabled": false, BROKEN';
+  writeFileSync(file, broken, "utf8");
+  const store = new ConfigStore(file, {});
+  assert.equal(store.load().enabled, false, "冷启动坏配置必须 fail closed");
+  assert.equal(readFileSync(file, "utf8"), broken, "坏配置原字节不得被默认值覆盖");
+  assert.equal(store.lastError?.code, "CONFIG_PARSE_FAILED");
+  assert.throws(() => store.save({ enabled: true }), { code: "CONFIG_PARSE_FAILED" });
+  writeFileSync(file, JSON.stringify({ enabled: true, advisor: { teacher: { enabled: true, cooldownBlocks: 9, inputBudget: 23000, maxTokens: 2222, timeoutMs: 44000 } } }), "utf8");
+  assert.equal(store.load().enabled, true, "有效配置恢复后应自动重读");
+  store.save({ advisor: { teacher: { enabled: false } } });
+  const teacher = store.load().advisor.teacher;
+  assert.deepEqual(teacher, { enabled: false, cooldownBlocks: 9, depthRange: [1, 5], inputBudget: 23000, maxTokens: 2222, timeoutMs: 44000 });
 });
 
 await check("config API：映射表是整表替换 —— 删除与清空都能落盘", async () => {

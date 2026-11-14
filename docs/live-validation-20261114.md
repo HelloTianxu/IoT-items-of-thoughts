@@ -67,4 +67,4 @@ readable-v2不再在正文后重复整份Exact host event JSON/stream；普通�
 - [DGX完整轮次](</Users/zhangtianxu/.dsh/plugin-data/iot-thinking/sessions/d091cf0add3e229239a5418cc478a59dedef0030e300c0cca935293bcc16b5b0/turn-000000000001-57786653-0eb8-5075-a3c5-67f9895fd684.md>)
 - [DGX记忆总览](</Users/zhangtianxu/.dsh/plugin-data/iot-thinking/sessions/d091cf0add3e229239a5418cc478a59dedef0030e300c0cca935293bcc16b5b0/memory.md>)
 
-最新结论：工具化分层记忆与真实DGX原思/处理/增强归档均已验证，Markdown重复渲染及导航已修复。自然自主召回、Windows和慢磁盘长期压力仍不在本次结论范围。未提交或推送源码。
+最新结论：工具化分层记忆与真实DGX原思/处理/增强归档均已验证，Markdown重复渲染及导航已修复。后续定位到大历史回填逐事件锁/fsync会阻塞主进程，已改为批量归档；5000事件约10.13MB的同机基准总计约354ms。自然自主召回、Windows和慢磁盘长期压力仍不在本次结论范围。相关源码已提交并推送社区PR。

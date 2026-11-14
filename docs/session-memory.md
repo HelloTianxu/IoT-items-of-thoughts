@@ -20,9 +20,9 @@ sessions/<session-hash>/
 
 宿主 session/event 记录用户来源、system/developer、助手正文、reasoning、工具调用/结果、取消或失败 attempt 及其他事件。不是每次请求复制全部Context。原始 reasoning 在 IoT 前观察，块结束先保存；处理后内容、建议以 request UUID + block 关联。无原始记录时明确标 ORIGINAL MISSING，不能将历史已改写内容冒充原思。
 
-会话创建/首次调用使用公开 sessionQuery.readSession 补抓一次历史，实时事件按seq幂等落盘；没有该服务或读取失败只捕获活跃事件，coverage报告序列缺口。重放不能恢复插件启用前已被改写的原始思考。后台查询上限5秒，失败不挂死模型。流finally保存已观察但未闭合块的partial；进程被强杀时未到block-end的原始delta仍可能缺失。
+会话创建/首次调用使用公开 sessionQuery.readSession 补抓一次历史，实时事件按seq幂等落盘；没有该服务或读取失败只捕获活跃事件，coverage报告序列缺口。历史回填先完整校验，再用单次归档锁和单次 durable append 批量写入；同 seq 同内容幂等、不同内容拒绝。重放不能恢复插件启用前已被改写的原始思考。后台查询上限5秒，失败不挂死模型。流finally保存已观察但未闭合块的partial；进程被强杀时未到block-end的原始delta仍可能缺失。
 
-JSONL与原思同步写入/fsync；Markdown延后渲染并在flush完成。原思或处理记录保存失败会否决本块替换，保留原块；宿主事件归档失败只报告session-log-error，不回滚真实工具操作。索引中的coverage只说明已观察seq前缀，不等于所有原始思考都存在。
+JSONL与原思同步写入/fsync；Markdown延后渲染并在flush完成。Markdown是可从JSONL重建的投影，使用同目录tmp + rename原子替换，整批完成后统一同步目录，不为每轮单独fsync。原思或处理记录保存失败会否决本块替换，保留原块；宿主事件归档失败只报告session-log-error，不回滚真实工具操作。索引中的coverage只说明已观察seq前缀，不等于所有原始思考都存在。
 
 **范围与边界：**当前实现要求POSIX目录fsync（本机macOS验证）；Windows明确拒绝新归档，既有模型流保留原文，不承诺Windows ACL支持。二进制附件保留事件中的引用而非复制附件文件。默认无自动清理/容量配额，会持续占磁盘；不要把此目录上传或放公共共享目录。新建目录0700/文件0600、拒绝symlink/多硬链接；同用户/管理员恶意并发改路径不在安全保证内。遗留锁或JSONL尾部撕裂会拒绝追加，不自动抢锁/截断；先停写者核验，再由管理员修复。
 
@@ -57,4 +57,4 @@ ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" session-host-test.mjs
 ELECTRON_RUN_AS_NODE=1 "$DSH_NODE_EXECUTABLE" host-context-test.mjs --expect-context
 ```
 
-测试覆盖多步轮次、原思/精炼关联、正文工具保留、重启与乱序补抓、缺原思/中断、冲突、路径隔离、私有文件、撕裂与锁拒绝、记忆CRUD/版本/来源、真实宿主工具schema与skill注册。真实长任务下的主动写记忆/召回准确率、磁盘慢写压力与GUI验收未由离线测试证明。
+测试覆盖多步轮次、原思/精炼关联、正文工具保留、重启与乱序补抓、批量回填幂等与冲突、缺原思/中断、路径隔离、私有文件、撕裂与锁拒绝、记忆CRUD/版本/来源、真实宿主工具schema与skill注册。同机5000事件（约10.13MB）基准中，权威事件写入约118ms、Markdown投影约236ms、合计约354ms；这是单机样本，不是跨平台SLA。真实长任务下的主动写记忆/召回准确率、Windows和长期磁盘压力仍未由离线测试证明。
