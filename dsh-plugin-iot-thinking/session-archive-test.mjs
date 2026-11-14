@@ -54,6 +54,24 @@ test('restart, seq deduplication, out-of-order replay, and conflicts are lossles
   assert.deepEqual(raw.map(r => r.event.seq), [2, 0, 1]);
 });
 
+test('batch event backfill is lossless, idempotent, and conflict-safe', t => {
+  const { archive } = fixture(t), sid = 'batch';
+  const events = [
+    event(0, 'turn/start', { turn: 1 }),
+    event(1, 'user/message', message('user', 'batch replay')),
+    event(2, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+  ];
+  assert.deepEqual(archive.recordEvents(sid, events), {
+    stored: 3, duplicates: 0, path: archive.inspect(sid).files.events,
+  });
+  assert.deepEqual(archive.read(sid, { format: 'events' }).map(item => item.seq), [0, 1, 2]);
+  assert.deepEqual(archive.recordEvents(sid, [...events, events[2]]), {
+    stored: 0, duplicates: 4, path: archive.inspect(sid).files.events,
+  });
+  assert.throws(() => archive.recordEvents(sid, [{ ...events[1], data: message('user', 'conflict') }]), { code: 'ARCHIVE_CONFLICT' });
+  assert.equal(archive.inspect(sid).eventCount, 3);
+});
+
 test('UUID original and processed phases associate by request/block, never overwrite', t => {
   const { archive } = fixture(t), sid = 'rewrite', request = randomUUID();
   const original = { id: randomUUID(), request, turn: 2, step: 3, block: 0, phase: 'original', original: 'raw long reasoning\n```\nraw', status: 'complete' };

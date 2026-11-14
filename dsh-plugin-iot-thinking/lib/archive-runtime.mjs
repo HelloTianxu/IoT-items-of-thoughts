@@ -68,11 +68,12 @@ export function createArchiveRuntime(ctx, { getConfig, mark = () => {}, archive 
         if (disposed || !active()) return;
         const events = snapshot?.events;
         if (!Array.isArray(events)) throw new Error('sessionQuery.readSession returned no events');
-        for (let i = 0; i < events.length; i++) {
-          record(id, events[i]);
-          if (i % 128 === 127) await new Promise(resolve => setImmediate(resolve));
-          if (disposed) return;
-        }
+        if (disposed) return;
+        // Historical hydration is already an in-memory snapshot. Persist it under
+        // one archive lock/fsync cycle instead of blocking the host event loop with
+        // several durable transactions per event.
+        for (const event of events) rememberPosition(id, event);
+        attempt(id, () => storage().recordEvents(id, events));
         flush(id);
       } catch (error) { report(id, error); }
     })();
@@ -124,6 +125,9 @@ export function createArchiveRuntime(ctx, { getConfig, mark = () => {}, archive 
     };
     return {
       async *observe(source) {
+        // Preserve the initialization barrier so captured reasoning keeps the exact
+        // turn/step association. Batched hydration makes this bounded: one archive
+        // transaction instead of several durable transactions per historical event.
         await ensure(id);
         if (position.turn === undefined) position = positions.get(id) ?? attempt(id, () => storage().getPosition?.(id)) ?? {};
         const blocks = new Map();

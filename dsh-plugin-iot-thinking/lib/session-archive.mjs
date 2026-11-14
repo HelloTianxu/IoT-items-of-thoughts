@@ -87,6 +87,24 @@ function atomic(path, text) {
   if (dirname(resolve(temp)) !== dir || dirname(resolve(path)) !== dir) throw error('ARCHIVE_UNSAFE_PATH', 'Invalid atomic target');
   regular(temp); regular(path, true); renameSync(temp, path); syncDir(dir);
 }
+// Markdown is a rebuildable projection of durable events.jsonl. Avoid an fsync +
+// directory fsync for every turn: a crash may leave a missing/stale projection,
+// which the next flush detects and rebuilds without affecting authoritative data.
+function atomicProjection(path, text) {
+  const dir = directory(dirname(path)); regular(path, true);
+  const temp = join(dir, `.render-${randomUUID()}.tmp`);
+  const fd = openFile(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL);
+  try {
+    const bytes = Buffer.from(text); let offset = 0;
+    while (offset < bytes.length) {
+      const count = writeSync(fd, bytes, offset, bytes.length - offset);
+      if (!count) throw error('ARCHIVE_WRITE', 'Zero-length write');
+      offset += count;
+    }
+  } finally { closeSync(fd); }
+  if (dirname(resolve(temp)) !== dir || dirname(resolve(path)) !== dir) throw error('ARCHIVE_UNSAFE_PATH', 'Invalid atomic target');
+  regular(temp); regular(path, true); renameSync(temp, path);
+}
 function fenced(text, language = '') {
   text = String(text);
   let longest = 0;
@@ -442,6 +460,55 @@ export class SessionArchive {
     });
   }
   recordEvent(sessionId, event) { return this._record(sessionId, 'event', event); }
+  recordEvents(sessionId, events) {
+    if (!Array.isArray(events)) throw error('ARCHIVE_INVALID_EVENT', 'events must be an array');
+    if (!events.length) return { stored: 0, duplicates: 0, path: null };
+    return this._run(() => {
+      const prepared = events.map(payload => {
+        const encoded = canonical(payload);
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+          || !integer(payload.seq) || typeof payload.type !== 'string' || !payload.type
+          || !Object.hasOwn(payload, 'data')) {
+          throw error('ARCHIVE_INVALID_EVENT', 'Event needs nonnegative seq, type and data');
+        }
+        return { payload, encoded, key: identityOf('event', payload) };
+      });
+      return this._locked(sessionId, true, dir => {
+        const loaded = this._load(dir, sessionId), path = join(dir, 'events.jsonl');
+        if (loaded.torn) throw error('ARCHIVE_TORN_TAIL', 'Existing incomplete JSONL tail retained; refusing append rather than overwrite original bytes');
+        const pending = new Map();
+        let duplicates = 0;
+        for (const item of prepared) {
+          const prior = pending.has(item.key) ? pending.get(item.key) : loaded.identities.get(item.key);
+          if (prior !== undefined) {
+            if (prior !== item.encoded) throw error('ARCHIVE_CONFLICT', 'Conflicting ' + item.key);
+            duplicates++;
+          } else pending.set(item.key, item.encoded);
+        }
+        const freshByKey = new Map();
+        for (const item of prepared) if (loaded.identities.get(item.key) === undefined && !freshByKey.has(item.key)) freshByKey.set(item.key, item);
+        const fresh = [...freshByKey.values()];
+        if (!fresh.length) return { stored: 0, duplicates, path };
+        const rows = fresh.map(({ payload }) => ({ version: 1, sessionId, kind: 'event', event: payload }));
+        const fd = openFile(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND);
+        try { writeAll(fd, rows.map(row => JSON.stringify(row) + '\n').join('')); } finally { closeSync(fd); }
+        syncDir(dir);
+        for (let index = 0; index < fresh.length; index++) {
+          const { payload, encoded, key } = fresh[index], row = rows[index];
+          if (payload.seq !== loaded.lastSeq + 1) loaded.dirty = null;
+          if (payload.type === 'turn/start') loaded.activeTurn = payload.data.turn;
+          loaded.dirty?.add(turnKey(payload.data?.turn ?? loaded.activeTurn));
+          if (payload.type === 'turn/end') loaded.activeTurn = undefined;
+          loaded.lastSeq = Math.max(loaded.lastSeq, payload.seq);
+          loaded.rows.push(JSON.parse(JSON.stringify(row)));
+          loaded.identities.set(key, encoded);
+        }
+        loaded.stamp = fingerprint(path);
+        loaded.view = null;
+        return { stored: fresh.length, duplicates, path };
+      });
+    });
+  }
   recordReasoning(sessionId, record) { return this._record(sessionId, 'reasoning', record); }
   _snapshot(sessionId, fn) { return this._run(() => this._locked(sessionId, false, dir => { const loaded = this._load(dir, sessionId); return fn(dir, loaded, loaded.view ??= model(loaded.rows)); })); }
   _description(sessionId, dir, loaded, view) {
@@ -509,11 +576,13 @@ export class SessionArchive {
       }
       const index = renderIndex(id, view, loaded.warnings, hasMemory);
       outputs.push(['index.md', index, digest(index)]);
+      let wroteProjection = false;
       for (const [name, text, signature] of outputs) {
         const path = join(dir, name);
-        if (!stat(path) || readFile(path) !== text) { atomic(path, text); files.push(path); }
+        if (!stat(path) || readFile(path) !== text) { atomicProjection(path, text); files.push(path); wroteProjection = true; }
         loaded.rendered.set(name, signature);
       }
+      if (wroteProjection) syncDir(dir);
       loaded.dirty = new Set();
     });
     return { sessions: ids.length, files };
